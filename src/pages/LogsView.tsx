@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export const LogsView: React.FC = () => {
+  const [loadError, setLoadError] = useState(false);
+  const [clearError, setClearError] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
   const [filterText, setFilterText] = useState("");
   const [levelFilter, setLevelFilter] = useState<"ALL" | "ERROR" | "INFO">(
@@ -14,9 +16,10 @@ export const LogsView: React.FC = () => {
       .then((res) => {
         if (Array.isArray(res)) {
           setLines(res);
+          setLoadError(false);
         }
       })
-      .catch(() => {});
+      .catch(() => setLoadError(true));
   }, []);
 
   useEffect(() => {
@@ -27,11 +30,12 @@ export const LogsView: React.FC = () => {
   }, [loadLogs, autoRefresh]);
 
   const handleClearLogs = async () => {
+    setClearError(false);
     try {
       await invoke("clear_sync_logs");
       setLines([]);
     } catch {
-      // Ignore
+      setClearError(true);
     }
   };
 
@@ -126,7 +130,13 @@ export const LogsView: React.FC = () => {
         </div>
       </header>
 
-      {filteredLines.length === 0 ? (
+      {(loadError || clearError) && (
+        <div role="alert" className="banner banner-error">
+          {loadError ? "Não foi possível carregar os logs. Os registros exibidos podem estar desatualizados." : "Não foi possível limpar os logs."}
+          <button type="button" onClick={loadError ? loadLogs : handleClearLogs}>Tentar novamente</button>
+        </div>
+      )}
+      {filteredLines.length === 0 && !loadError ? (
         <div className="empty-table-view">
           <p className="empty-status">Nenhum registro de log encontrado.</p>
           <span className="empty-subtext">

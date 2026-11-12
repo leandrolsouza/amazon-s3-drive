@@ -15,6 +15,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tokio::io::AsyncWriteExt;
 
 pub const MIN_PART_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 pub const DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
@@ -67,7 +68,9 @@ pub fn compute_md5(path: &Path) -> Result<String, S3Error> {
     let mut hasher = Md5::new();
     let mut buffer = [0u8; 65536];
     loop {
-        let n = file.read(&mut buffer).map_err(|e| S3Error::Io(e.to_string()))?;
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| S3Error::Io(e.to_string()))?;
         if n == 0 {
             break;
         }
@@ -153,8 +156,8 @@ impl S3Client {
                 .await
         };
 
-        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config)
-            .force_path_style(force_path_style);
+        let mut s3_config_builder =
+            aws_sdk_s3::config::Builder::from(&sdk_config).force_path_style(force_path_style);
 
         if let Some(ep) = endpoint_url {
             let trimmed = ep.trim();
@@ -251,11 +254,16 @@ impl S3Client {
     }
 
     pub async fn test_access(&self) -> Result<(), S3Error> {
+        self.test_prefix_access(None).await
+    }
+
+    pub(crate) async fn test_prefix_access(&self, prefix: Option<&str>) -> Result<(), S3Error> {
         match &self.backend {
             ClientBackend::Aws(client) => {
                 client
                     .list_objects_v2()
                     .bucket(&self.bucket)
+                    .set_prefix(prefix.map(str::to_owned))
                     .max_keys(1)
                     .send()
                     .await
@@ -274,10 +282,67 @@ impl S3Client {
         }
     }
 
-    pub async fn list_objects(
-        &self,
-        prefix: Option<&str>,
-    ) -> Result<Vec<S3ObjectInfo>, S3Error> {
+    pub(crate) async fn discover_buckets(&self) -> Result<Vec<(String, Option<String>)>, S3Error> {
+        use aws_sdk_s3::error::ProvideErrorMetadata;
+
+        let ClientBackend::Aws(client) = &self.backend else {
+            return Err(S3Error::Sdk("Cliente AWS necessário.".into()));
+        };
+        let mut pages = client.list_buckets().max_buckets(1000).into_paginator().send();
+        let mut buckets = Vec::new();
+        while let Some(page) = pages.next().await {
+            let page = page.map_err(|error| {
+                S3Error::Sdk(error.as_service_error().and_then(|err| err.code())
+                    .unwrap_or("Falha ao listar os buckets.").to_string())
+            })?;
+            buckets.extend(page.buckets().iter().filter_map(|bucket| {
+                Some((bucket.name()?.to_owned(), bucket.bucket_region().map(str::to_owned)))
+            }));
+        }
+        buckets.sort_unstable();
+        Ok(buckets)
+    }
+
+    pub(crate) async fn create_private_bucket(&self, region: &str) -> Result<(), S3Error> {
+        use aws_sdk_s3::error::ProvideErrorMetadata;
+        use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
+
+        let ClientBackend::Aws(client) = &self.backend else {
+            return Err(S3Error::Sdk("Cliente AWS necessário.".into()));
+        };
+        // Em us-east-1, repetir CreateBucket em um bucket próprio pode alterar ACLs legadas.
+        if region == "us-east-1" {
+            match client.head_bucket().bucket(&self.bucket).send().await {
+                Err(error) if error.raw_response().is_some_and(|r| r.status().as_u16() == 404) => {}
+                _ => return Err(S3Error::Sdk(
+                    "O nome já está em uso ou não foi possível confirmar sua disponibilidade.".into(),
+                )),
+            }
+        }
+        let mut request = client.create_bucket().bucket(&self.bucket);
+        if region != "us-east-1" {
+            request = request.create_bucket_configuration(
+                CreateBucketConfiguration::builder()
+                    .location_constraint(BucketLocationConstraint::from(region))
+                    .build(),
+            );
+        }
+        // Preserva os padrões do S3 de bloqueio de acesso público e ACLs desativadas.
+        request.send().await.map_err(|error| {
+            let code = error.as_service_error().and_then(|err| err.code());
+            let message = match code {
+                Some("BucketAlreadyExists") => "Esse nome de bucket já está em uso.",
+                Some("BucketAlreadyOwnedByYou") => "Esse bucket já existe na sua conta. Adicione-o como existente.",
+                Some("AccessDenied") => "A identidade AWS precisa de s3:CreateBucket.",
+                Some(code) => code,
+                None => "O S3 não confirmou a criação. Consulte a lista de buckets antes de tentar novamente.",
+            };
+            S3Error::Sdk(message.into())
+        })?;
+        Ok(())
+    }
+
+    pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, S3Error> {
         match &self.backend {
             ClientBackend::Aws(client) => {
                 let mut result = Vec::new();
@@ -294,10 +359,7 @@ impl S3Client {
                         req = req.continuation_token(token);
                     }
 
-                    let resp = req
-                        .send()
-                        .await
-                        .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                    let resp = req.send().await.map_err(|e| S3Error::Sdk(e.to_string()))?;
 
                     for obj in resp.contents() {
                         if let Some(key) = obj.key() {
@@ -419,10 +481,49 @@ impl S3Client {
         }
     }
 
+    /// Exclusão condicional: uma edição concorrente nunca deve ser apagada pela decisão anterior.
+    pub async fn delete_object_if_match(&self, key: &str, etag: &str) -> Result<(), S3Error> {
+        match &self.backend {
+            ClientBackend::Aws(client) => {
+                client
+                    .delete_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .if_match(format!("\"{}\"", normalize_etag(etag)))
+                    .send()
+                    .await
+                    .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                Ok(())
+            }
+            ClientBackend::Mock(mock) => {
+                let mut guard = mock.lock().unwrap();
+                if guard.fail_delete
+                    || guard.objects.get(key).map(|o| normalize_etag(&o.etag))
+                        != Some(normalize_etag(etag))
+                {
+                    return Err(S3Error::Sdk(
+                        "Exclusão cancelada: versão mudou ou remoção falhou.".into(),
+                    ));
+                }
+                guard.objects.remove(key);
+                Ok(())
+            }
+        }
+    }
+
     pub async fn copy_object(&self, src: &str, dst: &str) -> Result<(), S3Error> {
         match &self.backend {
             ClientBackend::Aws(client) => {
-                let copy_source = format!("{}/{}", self.bucket, src);
+                let copy_source: String = format!("{}/{}", self.bucket, src)
+                    .bytes()
+                    .map(|byte| {
+                        if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
+                            (byte as char).to_string()
+                        } else {
+                            format!("%{byte:02X}")
+                        }
+                    })
+                    .collect();
                 client
                     .copy_object()
                     .bucket(&self.bucket)
@@ -463,14 +564,8 @@ impl S3Client {
                 if self.server_side_encryption {
                     req = req.server_side_encryption(ServerSideEncryption::Aes256);
                 }
-                let resp = req
-                    .send()
-                    .await
-                    .map_err(|e| S3Error::Sdk(e.to_string()))?;
-                let etag = resp
-                    .e_tag()
-                    .map(normalize_etag)
-                    .unwrap_or(computed_etag);
+                let resp = req.send().await.map_err(|e| S3Error::Sdk(e.to_string()))?;
+                let etag = resp.e_tag().map(normalize_etag).unwrap_or(computed_etag);
                 Ok(etag)
             }
             ClientBackend::Mock(mock) => {
@@ -517,9 +612,8 @@ impl S3Client {
 
         // Verificar estado de retomada (expira após 24 horas — Requisito 2.7)
         let now = Utc::now();
-        let valid_resume = resume.filter(|state| {
-            now.signed_duration_since(state.created_at) < Duration::hours(24)
-        });
+        let valid_resume = resume
+            .filter(|state| now.signed_duration_since(state.created_at) < Duration::hours(24));
 
         let mut state = if let Some(existing) = valid_resume {
             existing
@@ -534,10 +628,7 @@ impl S3Client {
                     if self.server_side_encryption {
                         req = req.server_side_encryption(ServerSideEncryption::Aes256);
                     }
-                    let resp = req
-                        .send()
-                        .await
-                        .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                    let resp = req.send().await.map_err(|e| S3Error::Sdk(e.to_string()))?;
                     resp.upload_id()
                         .ok_or_else(|| S3Error::Sdk("Missing upload_id".to_string()))?
                         .to_string()
@@ -707,19 +798,22 @@ impl S3Client {
                     .map_err(|e| S3Error::Sdk(e.to_string()))?;
 
                 let etag = resp.e_tag().map(normalize_etag).unwrap_or_default();
-                let bytes = resp
-                    .body
-                    .collect()
-                    .await
-                    .map_err(|e| S3Error::Sdk(e.to_string()))?
-                    .into_bytes();
 
-                let mut tmp_file =
-                    File::create(&temp_path).map_err(|e| S3Error::Io(e.to_string()))?;
-                tmp_file
-                    .write_all(&bytes)
+                // Transmitir o corpo diretamente para o arquivo temporário sem
+                // carregar o objeto inteiro em memória (Requisito 3.5).
+                let mut reader = resp.body.into_async_read();
+                let mut tmp_file = tokio::fs::File::create(&temp_path)
+                    .await
                     .map_err(|e| S3Error::Io(e.to_string()))?;
-                tmp_file.flush().map_err(|e| S3Error::Io(e.to_string()))?;
+                tokio::io::copy(&mut reader, &mut tmp_file)
+                    .await
+                    .map_err(|e| S3Error::Sdk(format!("Erro ao transmitir '{}': {}", key, e)))?;
+                tmp_file
+                    .flush()
+                    .await
+                    .map_err(|e| S3Error::Io(e.to_string()))?;
+                drop(tmp_file);
+
                 etag
             }
             ClientBackend::Mock(mock) => {
@@ -808,10 +902,7 @@ impl S3Client {
     }
 
     /// Lista as versões disponíveis de um objeto específico no bucket S3
-    pub async fn list_object_versions(
-        &self,
-        key: &str,
-    ) -> Result<Vec<S3ObjectVersion>, S3Error> {
+    pub async fn list_object_versions(&self, key: &str) -> Result<Vec<S3ObjectVersion>, S3Error> {
         match &self.backend {
             ClientBackend::Aws(client) => {
                 let resp = client
@@ -856,7 +947,10 @@ impl S3Client {
                     Ok(vec![S3ObjectVersion {
                         version_id: "v1-latest".to_string(),
                         is_latest: true,
-                        last_modified: obj.last_modified.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                        last_modified: obj
+                            .last_modified
+                            .format("%Y-%m-%d %H:%M:%S UTC")
+                            .to_string(),
                         size_bytes: obj.bytes.len() as u64,
                         etag: normalize_etag(&obj.etag),
                     }])
@@ -886,10 +980,7 @@ impl S3Client {
                 if !version_id.is_empty() && version_id != "null" {
                     req = req.version_id(version_id);
                 }
-                let resp = req
-                    .send()
-                    .await
-                    .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                let resp = req.send().await.map_err(|e| S3Error::Sdk(e.to_string()))?;
 
                 let etag = resp.e_tag().map(normalize_etag).unwrap_or_default();
                 let bytes = resp

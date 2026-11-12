@@ -83,6 +83,7 @@ export interface InitialCompleteEvent {
 
 export interface TransferProgressEvent {
   path: string;
+  operation: "Upload" | "Download";
   bytes_transferred: number;
   total_bytes: number;
   percent: number;
@@ -174,4 +175,12 @@ export function computeFrontendGlobalState(
     return "Syncing";
   }
   return "UpToDate";
+}
+export interface DeletionReview {
+  s3_key: string;
+  local_path: string;
+  deleted_side: "local" | "remote";
+  other_side_changed: boolean;
+  remote_etag: string | null;
+  local_hash: string | null;
 }

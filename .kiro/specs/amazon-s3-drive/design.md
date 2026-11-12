@@ -1,5 +1,15 @@
 # Design Document: Amazon S3 Drive
 
+## Reconciliação persistida de exclusões
+
+`SyncEngine::poll_remote_changes` compara `file_registry`, arquivos locais e a listagem remota. Arquivos conhecidos ausentes de um lado geram `DeletionReview` em `deletion_reviews` (tabela aditiva criada também em bancos existentes). ETag remoto e hash local representam a revisão exibida. As operações normais da fila e a varredura local não devem sobrescrever arquivos em revisão. Objetos desconhecidos no S3 continuam sendo baixados; prefixos S3 são removidos ao mapear o caminho local.
+
+`get_deletion_reviews` retorna pendências persistidas à interface, consultadas a cada dois segundos por `DeletionReviewPanel`. `resolve_deletion(review, restore)` recebe a revisão completa exibida, compara-a com a persistida e revalida os conteúdos. Um mutex serializa decisões e polling. Alterações concorrentes invalidam a decisão; a exclusão remota usa `If-Match` com o ETag aprovado.
+
+Restaurar significa baixar se o lado excluído é local ou enviar se o lado excluído é remoto. Confirmar significa copiar o objeto remoto para `<prefixo>/.s3-drive-trash/<timestamp>/<chave>` antes de apagar, ou mover o arquivo local para `<pasta>/.s3-drive-trash/<timestamp>/<nome>`. Cópias internas não entram na sincronização. Falhas de cópia impedem a remoção; não há coleta automática dessas cópias nem interface de recuperação nesta etapa. O backend exige permissão de cópia/leitura e gravação no prefixo de recuperação. A troca de identidade da configuração limpa as pendências junto com o restante do estado.
+
+Uma pasta raiz previamente sincronizada indisponível bloqueia o início em vez de ser recriada vazia. DownloadOnly restaura ausências locais e preserva uma cópia local antes de aplicar exclusões remotas; UploadOnly não infere exclusões locais feitas com o app fechado.
+
 ## Overview
 
 O Amazon S3 Drive é uma aplicação desktop cross-platform construída com **Tauri 2.x** (Rust + React/TypeScript). O aplicativo cria um drive virtual que sincroniza arquivos bidirecionalmente entre uma pasta local no computador do usuário e um bucket Amazon S3, operando em segundo plano via system tray.
@@ -1172,3 +1182,54 @@ Suite separada com AWS mockado (via [`aws-sdk-s3` mock](https://docs.rs/aws-sdk-
 ### Testes de Componente E2E
 
 Via Tauri's WebDriver API: fluxo completo de configuração → sync → status → notificação via tray.
+
+
+### Feedback e estado da interface desktop
+
+- Em qualquer tela, a barra inferior mostra o nome de um arquivo em estado Syncing e a contagem dos demais. O campo `operation` de `sync:transfer-progress` permite indicar envio ou download. O percentual é exibido para envios, que informam progresso em bytes.
+
+- O comando Tauri de leitura `get_sync_running` retorna um booleano do indicador atômico do SyncEngine. O frontend consulta esse estado ao montar a aplicação e a cada 2,5 segundos, sem sobrepor operações locais em andamento. Se a leitura falhar, o estado é apresentado como indisponível.
+- `syncRunning` e `syncAction` no store distinguem o ciclo de vida do motor dos estados individuais dos arquivos. A barra inferior e o badge de sincronização usam a mesma apresentação; configuração salva não implica conexão ativa. Uma falha na inicialização encerra os recursos iniciados antes de retornar o erro.
+- Exclusões usam um diálogo modal nativo com foco inicial em Cancelar, restauração de foco, lista fixa dos alvos e identificação dos dois destinos. Nenhum comando destrutivo é chamado antes da confirmação. O diálogo bloqueia novas ações durante a solicitação e permanece aberto em caso de falha, incluindo aviso sobre execução parcial.
+- Falhas de resolução preservam os conflitos e permitem nova tentativa. As opções do conflito ficam desabilitadas durante a solicitação. Manter ambas confirma a preservação das duas cópias já criadas pelo motor.
+- Falhas ao abrir pasta ou carregar/limpar logs oferecem nova tentativa. Falha ao carregar logs é distinta de histórico vazio; registros anteriores são preservados. Alertas de credenciais oferecem acesso às configurações e só são limpos após inicialização bem-sucedida.
+
+
+### Configuração inicial e alterações pendentes
+
+- App lê a configuração antes de selecionar a tela inicial. Bucket e pasta preenchidos direcionam para Sincronização; configuração incompleta abre o guia de três etapas. Falhas de leitura mostram nova tentativa.
+- Ao abrir com configuração salva de bucket e pasta, App consulta `get_sync_running` e chama `start_sync` uma única vez se o motor estiver parado. Não reinicia um motor ativo nem inicia automaticamente após concluir o primeiro cadastro. Falhas de consulta ou início exibem o motivo, acesso às configurações e nova tentativa manual, sem repetição automática. O estado Conectando acompanha o comando até terminar a varredura inicial; a tela recarrega o monitor de arquivos quando o estado do motor muda para recuperar eventos anteriores à montagem.
+- ConfigurationPage mantém um rascunho e uma cópia da configuração salva para detectar alterações. O componente permanece montado durante a navegação entre telas, preservando o rascunho somente em memória. Ajustes de transferências, armazenamento, exclusões e notificações ficam em uma seção avançada recolhida.
+- A configuração inicial reúne conexão e autenticação, depois pasta/prefixo/direção, e finalmente um resumo dos destinos. Nenhum início ocorre antes da revisão. A conexão é verificada pelo comando de início, com a opção de salvar e testar separadamente na revisão.
+- Salvar alterações valida e persiste a configuração e, quando editadas, as credenciais pelo comando seguro existente. Campos de credenciais são limpos após sucesso. Salvar e iniciar reutiliza o mesmo fluxo; falhas preservam as partes ainda pendentes. Notificações deixam de salvar automaticamente outras edições. Descartar alterações restaura o último estado salvo.
+- O contrato de `import_config_profile` permanece `AppConfig | null`, mas agora apenas lê e valida o perfil selecionado; não grava nem recarrega o motor. A aplicação só ocorre pelo comando existente `save_config`. Exportação e teste continuam operando sobre os valores salvos e ficam desabilitados enquanto houver rascunho pendente.
+- `test_connection` respeita IAM Role e a região da configuração salva, assim como o início da sincronização. Nenhuma credencial é retornada à interface.
+- O filtro Ativos usa um identificador próprio no frontend e inclui estados Pending e Syncing, mantendo o contador e os resultados consistentes.
+
+### Refinamento visual desktop
+
+- A barra de objetos separa o título dos controles e permite quebra de linha, preservando espaço para busca e navegação. A lista usa tipografia de interface nos nomes, linhas mais espaçosas e ações por ícones SVG com nomes acessíveis e dicas nativas.
+- Conclusão inicial e alertas de sincronização aparecem em uma pilha de toasts no canto inferior direito, sem deslocar a lista. Conflitos e erros permanecem disponíveis até resolução ou dispensa; a conclusão mantém os 5,5 segundos existentes.
+- Feedback de ações usa toast no canto superior direito. Sucessos desaparecem após 5,5 segundos; erros exigem dispensa. Revisão de exclusões e falhas de configuração permanecem junto ao contexto da ação.
+- Os temas claro e escuro compartilham as novas superfícies, foco de teclado e controles arredondados; animações respeitam a preferência por movimento reduzido.
+- A tela Armazenamento no menu lateral reúne a estimativa mensal, o volume total, a contagem de objetos e as principais extensões por volume. Ela consulta o comando existente ao abrir e acompanha as atualizações do monitor de arquivos.
+- A tela de objetos abre na visualização por pastas. A barra usa ícones com nomes acessíveis para trocar de visualização e executar comandos; os filtros mantêm seus rótulos e contagens.
+- O botão de envio e o gesto de soltar arquivos abrem uma revisão com seleção de arquivos, pasta de destino relativa à raiz da sincronização e classe configurada. É possível escolher um destino existente ou informar o caminho de uma nova pasta, inclusive com subpastas separadas por `/`. A importação começa após a confirmação e cria os diretórios locais necessários para sincronizar os arquivos no prefixo escolhido.
+- Armazenamento inclui um simulador mensal em USD para transferência pela internet. A saída usa volume previsto menos franquia disponível, multiplicado pela tarifa informada. O total soma a estimativa existente de armazenamento; requisições, recuperação, aceleração e impostos ficam fora da conta.
+- A previsão consulta os catálogos públicos AmazonS3 e AWSDataTransfer para a região configurada e aplica as faixas de preço ao volume informado. Mantém tarifa de saída editável e a estimativa local de armazenamento como referência quando o catálogo está indisponível. Não consulta faturamento automaticamente.
+- Consultar gasto do mês usa Cost Explorer com a identidade AWS configurada e requer ce:GetCostAndUsage. Uma ação busca uma página de custos de S3 agrupados por tipo de uso no mês UTC e indica subtotal se houver mais páginas. O resultado cobre as contas visíveis à identidade, com possíveis custos de outros buckets.
+
+### Publicação de site estático
+
+- Sites usa a configuração AWS e o gerenciador de credenciais existentes. O seletor de pastas do Windows preenche o campo de caminho. A última pasta local publicada fica nas preferências da interface. `browse_site_source` navega no bucket de sincronização dentro do prefixo configurado.
+- `preview_site_source` lista caminhos relativos, tamanhos e revisões para conferência. A lista mantém o `index.html` obrigatório na raiz e ignora nomes que começam com ponto, incluindo a lixeira interna da sincronização. A origem local também ignora itens ocultos do Windows e rejeita links simbólicos. `publish_site` revalida a seleção, aceita arquivos de até 5 GB e preserva os caminhos relativos. Objetos remotos são copiados entre buckets pelo S3 com condição de ETag.
+- Cada site novo tem uma pilha `S3DriveSite-<bucket>`, um bucket privado com bloqueio de acesso público e uma distribuição CloudFront com Origin Access Control. A política concede leitura em `releases/*` à distribuição da pilha. `list_published_sites` encontra pilhas gerenciadas na conta e região ativas, incluindo a pilha legada `AmazonS3DriveStaticSite`, que mantém seu bucket, modelo e link.
+- Publicação grava em `releases/<id>/`, registra a versão completa em `site-history/<id>` e atualiza o caminho de origem do CloudFront. `list_site_releases` lista versões com marcador e a versão ativa. Ao republicar um site legado, a versão ativa anterior ganha um marcador. `restore_site_release` valida a versão registrada e seu `index.html` antes de trocar a origem no mesmo endereço. Falhas no envio preservam a versão ativa.
+- A identidade precisa listar e consultar as pilhas, criar e atualizar as pilhas gerenciadas, provisionar os recursos S3 e CloudFront e ler, listar e gravar objetos nos destinos dedicados. A origem remota requer listagem e leitura no bucket de sincronização, além de acesso à chave KMS quando aplicável. Versões e envios interrompidos ocupam armazenamento. A remoção pode ser feita esvaziando o bucket dedicado e excluindo a pilha no CloudFormation.
+
+### Sincronização de múltiplos buckets
+
+- A tela Buckets apresenta a configuração principal e os vínculos adicionais. A configuração, a fila e o histórico existentes continuam em `config.json` e `sync.db` no diretório atual.
+- O catálogo `bucket_profiles` no SQLite guarda o ID estável, a configuração e o estado habilitado dos vínculos adicionais. Cada ID tem seu próprio motor, monitor, banco e log em `buckets/<id>/`. A interface consulta atividade, conflitos e revisões de exclusão pelo ID do vínculo.
+- Buckets adicionais usam a identidade AWS configurada no aplicativo e podem escolher região, prefixo e pasta local. O cadastro valida acesso e rejeita nomes de bucket duplicados e pastas locais sobrepostas. O vínculo entra pausado. Vínculos habilitados são retomados separadamente ao abrir o app.
+- A criação de bucket usa a API do Amazon S3 com os padrões de privacidade da AWS. A configuração da sincronização é uma etapa posterior, com validação de acesso independente da criação.

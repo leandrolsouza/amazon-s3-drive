@@ -34,8 +34,8 @@ impl QueueManager {
         created_at: DateTime<Utc>,
     ) -> Result<Option<i64>, QueueError> {
         let conn = self.conn.lock().unwrap();
-        let pending: usize = conn
-            .query_row(
+        let pending: usize =
+            conn.query_row(
                 "SELECT COUNT(*) FROM sync_queue WHERE state = 'Pending'",
                 [],
                 |row| row.get::<_, i64>(0),
@@ -179,6 +179,35 @@ impl QueueManager {
         Ok(items)
     }
 
+    /// Recoloca na fila as operações que ficaram em estado 'Processing' em uma sessão anterior
+    /// (crash ou fechamento forçado do aplicativo). Deve ser chamado na inicialização antes do
+    /// primeiro `process_queue`, de forma que nenhuma operação iniciada fique presa para sempre.
+    pub fn recover_interrupted_items(&self) -> Result<usize, QueueError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "UPDATE sync_queue SET state = 'Pending' WHERE state = 'Processing'",
+                [],
+            )
+            .map_err(|e| QueueError::Database(e.to_string()))?;
+        Ok(affected as usize)
+    }
+
+    /// Recoloca na fila as operações em estado 'Failed' para nova tentativa.
+    /// Chamado quando a conectividade de rede é restaurada, para que falhas transitórias
+    /// (timeout, erro de conexão) sejam automaticamente re-tentadas sem intervenção do usuário.
+    pub fn requeue_failed_items(&self) -> Result<usize, QueueError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "UPDATE sync_queue SET state = 'Pending', error_message = NULL \
+                 WHERE state = 'Failed'",
+                [],
+            )
+            .map_err(|e| QueueError::Database(e.to_string()))?;
+        Ok(affected as usize)
+    }
+
     fn row_to_item(row: &rusqlite::Row) -> Result<QueueItem, rusqlite::Error> {
         let id: i64 = row.get(0)?;
         let op_str: String = row.get(1)?;
@@ -229,12 +258,14 @@ mod tests {
             "[a-zA-Z0-9/_.-]{1,30}",
             prop::option::of("[a-zA-Z0-9/_.-]{1,20}"),
         )
-            .prop_map(|(operation_type, s3_key, local_path, extra)| SyncOperation {
-                operation_type,
-                s3_key,
-                local_path,
-                extra,
-            })
+            .prop_map(
+                |(operation_type, s3_key, local_path, extra)| SyncOperation {
+                    operation_type,
+                    s3_key,
+                    local_path,
+                    extra,
+                },
+            )
     }
 
     // Feature: amazon-s3-drive, Property 9: Queue FIFO ordering

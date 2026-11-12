@@ -109,7 +109,14 @@ pub struct FileEntry {
     pub s3_key: String,
     pub local_path: String,
     pub sync_state: SyncState,
+    /// ETag retornado pelo S3 na última sincronização bem-sucedida.
+    /// Usado exclusivamente para detectar mudanças no lado remoto.
     pub last_sync_etag: Option<String>,
+    /// MD5 do arquivo local na última sincronização bem-sucedida.
+    /// Separado de `last_sync_etag` para que a detecção de mudanças locais não seja
+    /// afetada por ETags de uploads multipart (formato `hash-N`) ou objetos com SSE-KMS.
+    #[serde(default)]
+    pub local_hash: Option<String>,
     pub last_sync_time: Option<DateTime<Utc>>,
     pub local_modified_time: Option<DateTime<Utc>>,
     pub size_bytes: u64,
@@ -176,6 +183,16 @@ pub struct QueueItem {
 }
 
 // === Informações de Conflito ===
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeletionReview {
+    pub s3_key: String,
+    pub local_path: String,
+    pub deleted_side: String,
+    pub other_side_changed: bool,
+    pub remote_etag: Option<String>,
+    pub local_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConflictInfo {
     pub file_name: String,
@@ -295,6 +312,7 @@ pub struct InitialCompleteEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransferProgressEvent {
     pub path: String,
+    pub operation: SyncOperationType,
     pub bytes_transferred: u64,
     pub total_bytes: u64,
     pub percent: u8,

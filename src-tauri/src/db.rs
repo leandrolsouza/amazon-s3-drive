@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS file_registry (
     local_path      TEXT NOT NULL UNIQUE,
     sync_state      TEXT NOT NULL DEFAULT 'Synced',
     last_sync_etag  TEXT,
+    local_hash      TEXT,
     last_sync_time  TEXT,
     local_mtime     TEXT,
     size_bytes      INTEGER NOT NULL DEFAULT 0
@@ -44,6 +45,11 @@ CREATE TABLE IF NOT EXISTS multipart_state (
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS deletion_reviews (
+    s3_key TEXT PRIMARY KEY,
+    payload TEXT NOT NULL
 );
 
 -- Índices para performance
@@ -65,6 +71,9 @@ impl Database {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(DDL)?;
+        // Migração: adicionar local_hash a bancos existentes criados antes desta versão.
+        // Em bancos novos a coluna já existe no DDL; o erro é silenciosamente ignorado.
+        let _ = conn.execute("ALTER TABLE file_registry ADD COLUMN local_hash TEXT", []);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -73,6 +82,7 @@ impl Database {
     pub fn new_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(DDL)?;
+        let _ = conn.execute("ALTER TABLE file_registry ADD COLUMN local_hash TEXT", []);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -86,18 +96,20 @@ impl Database {
 
     pub fn upsert_file_entry(&self, entry: &FileEntry) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        let sync_state_str = serde_json::to_string(&entry.sync_state).unwrap_or_else(|_| "\"Synced\"".to_string());
+        let sync_state_str =
+            serde_json::to_string(&entry.sync_state).unwrap_or_else(|_| "\"Synced\"".to_string());
         let last_sync_time = entry.last_sync_time.map(|dt| dt.to_rfc3339());
         let local_mtime = entry.local_modified_time.map(|dt| dt.to_rfc3339());
 
         conn.execute(
             r#"
-            INSERT INTO file_registry (s3_key, local_path, sync_state, last_sync_etag, last_sync_time, local_mtime, size_bytes)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO file_registry (s3_key, local_path, sync_state, last_sync_etag, local_hash, last_sync_time, local_mtime, size_bytes)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(s3_key) DO UPDATE SET
                 local_path = excluded.local_path,
                 sync_state = excluded.sync_state,
                 last_sync_etag = excluded.last_sync_etag,
+                local_hash = excluded.local_hash,
                 last_sync_time = excluded.last_sync_time,
                 local_mtime = excluded.local_mtime,
                 size_bytes = excluded.size_bytes
@@ -107,6 +119,7 @@ impl Database {
                 entry.local_path,
                 sync_state_str,
                 entry.last_sync_etag,
+                entry.local_hash,
                 last_sync_time,
                 local_mtime,
                 entry.size_bytes as i64
@@ -115,20 +128,26 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_file_entry_by_key(&self, s3_key: &str) -> Result<Option<FileEntry>, rusqlite::Error> {
+    pub fn get_file_entry_by_key(
+        &self,
+        s3_key: &str,
+    ) -> Result<Option<FileEntry>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT s3_key, local_path, sync_state, last_sync_etag, last_sync_time, local_mtime, size_bytes FROM file_registry WHERE s3_key = ?1",
+            "SELECT s3_key, local_path, sync_state, last_sync_etag, local_hash, last_sync_time, local_mtime, size_bytes FROM file_registry WHERE s3_key = ?1",
             params![s3_key],
             |row| Self::row_to_file_entry(row),
         )
         .optional()
     }
 
-    pub fn get_file_entry_by_path(&self, local_path: &str) -> Result<Option<FileEntry>, rusqlite::Error> {
+    pub fn get_file_entry_by_path(
+        &self,
+        local_path: &str,
+    ) -> Result<Option<FileEntry>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT s3_key, local_path, sync_state, last_sync_etag, last_sync_time, local_mtime, size_bytes FROM file_registry WHERE local_path = ?1",
+            "SELECT s3_key, local_path, sync_state, last_sync_etag, local_hash, last_sync_time, local_mtime, size_bytes FROM file_registry WHERE local_path = ?1",
             params![local_path],
             |row| Self::row_to_file_entry(row),
         )
@@ -138,7 +157,7 @@ impl Database {
     pub fn list_file_entries(&self) -> Result<Vec<FileEntry>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s3_key, local_path, sync_state, last_sync_etag, last_sync_time, local_mtime, size_bytes FROM file_registry",
+            "SELECT s3_key, local_path, sync_state, last_sync_etag, local_hash, last_sync_time, local_mtime, size_bytes FROM file_registry",
         )?;
         let rows = stmt.query_map([], |row| Self::row_to_file_entry(row))?;
         let mut entries = Vec::new();
@@ -150,7 +169,10 @@ impl Database {
 
     pub fn delete_file_entry(&self, s3_key: &str) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM file_registry WHERE s3_key = ?1", params![s3_key])?;
+        conn.execute(
+            "DELETE FROM file_registry WHERE s3_key = ?1",
+            params![s3_key],
+        )?;
         Ok(())
     }
 
@@ -159,11 +181,13 @@ impl Database {
         let local_path: String = row.get(1)?;
         let sync_state_raw: String = row.get(2)?;
         let last_sync_etag: Option<String> = row.get(3)?;
-        let last_sync_time_raw: Option<String> = row.get(4)?;
-        let local_mtime_raw: Option<String> = row.get(5)?;
-        let size_bytes: i64 = row.get(6)?;
+        let local_hash: Option<String> = row.get(4)?;
+        let last_sync_time_raw: Option<String> = row.get(5)?;
+        let local_mtime_raw: Option<String> = row.get(6)?;
+        let size_bytes: i64 = row.get(7)?;
 
-        let sync_state: SyncState = serde_json::from_str(&sync_state_raw).unwrap_or(SyncState::Synced);
+        let sync_state: SyncState =
+            serde_json::from_str(&sync_state_raw).unwrap_or(SyncState::Synced);
         let last_sync_time = last_sync_time_raw
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&Utc));
@@ -176,6 +200,7 @@ impl Database {
             local_path,
             sync_state,
             last_sync_etag,
+            local_hash,
             last_sync_time,
             local_modified_time,
             size_bytes: size_bytes.max(0) as u64,
@@ -186,7 +211,8 @@ impl Database {
 
     pub fn save_multipart_state(&self, state: &MultipartState) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        let parts_json = serde_json::to_string(&state.completed_parts).unwrap_or_else(|_| "[]".to_string());
+        let parts_json =
+            serde_json::to_string(&state.completed_parts).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
             r#"
             INSERT INTO multipart_state (s3_key, upload_id, local_path, created_at, parts_json)
@@ -208,7 +234,10 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_multipart_state(&self, s3_key: &str) -> Result<Option<MultipartState>, rusqlite::Error> {
+    pub fn get_multipart_state(
+        &self,
+        s3_key: &str,
+    ) -> Result<Option<MultipartState>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT s3_key, upload_id, local_path, created_at, parts_json FROM multipart_state WHERE s3_key = ?1",
@@ -240,7 +269,10 @@ impl Database {
 
     pub fn delete_multipart_state(&self, s3_key: &str) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM multipart_state WHERE s3_key = ?1", params![s3_key])?;
+        conn.execute(
+            "DELETE FROM multipart_state WHERE s3_key = ?1",
+            params![s3_key],
+        )?;
         Ok(())
     }
 
@@ -272,7 +304,8 @@ impl Database {
     pub fn clear_all_sync_data(&self) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
-            "DELETE FROM sync_queue;\
+            "DELETE FROM deletion_reviews;\
+             DELETE FROM sync_queue;\
              DELETE FROM file_registry;\
              DELETE FROM multipart_state;",
         )?;

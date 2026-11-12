@@ -1,5 +1,7 @@
+mod buckets;
 pub mod config_parser;
 pub mod conflict_resolver;
+mod costs;
 pub mod credentials_manager;
 pub mod db;
 pub mod file_watcher;
@@ -7,6 +9,7 @@ pub mod models;
 pub mod network_detector;
 pub mod queue_manager;
 pub mod s3_client;
+mod site_publisher;
 pub mod status_monitor;
 pub mod sync_engine;
 pub mod tray;
@@ -32,6 +35,9 @@ pub struct AppState {
     pub creds_manager: Arc<CredentialsManager>,
     pub config_parser: Arc<ConfigParser>,
     pub db: Database,
+    buckets: Arc<buckets::BucketCatalog>,
+    primary_lifecycle: tokio::sync::Mutex<()>,
+    site_publication: tokio::sync::Mutex<()>,
 }
 
 #[tauri::command]
@@ -92,6 +98,9 @@ fn apply_os_autostart(enabled: bool) {
 
 #[tauri::command]
 fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
+    let _lifecycle = state.primary_lifecycle.try_lock()
+        .map_err(|_| "Aguarde a mudança de estado da sincronização.".to_string())?;
+    let _configuration = state.buckets.lock_configuration();
     if let Err(errs) = ConfigParser::validate(&config) {
         let msg = errs
             .iter()
@@ -99,6 +108,14 @@ fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), Stri
             .collect::<Vec<_>>()
             .join("; ");
         return Err(msg);
+    }
+
+    state.buckets.check_primary(&config)?;
+    if state.sync_engine.is_running()
+        && sync_engine::config_fingerprint(&config)
+            != sync_engine::config_fingerprint(&state.sync_engine.get_config())
+    {
+        return Err("Pause a sincronização principal antes de mudar seu destino ou pasta.".into());
     }
 
     let local_dir = PathBuf::from(&config.local_path);
@@ -121,10 +138,7 @@ fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn save_credentials(
-    creds: AwsCredentials,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+fn save_credentials(creds: AwsCredentials, state: State<'_, AppState>) -> Result<(), String> {
     if let Err(errs) = CredentialsManager::validate_format(&creds) {
         let msg = errs
             .iter()
@@ -133,20 +147,28 @@ fn save_credentials(
             .join("; ");
         return Err(msg);
     }
-    state
-        .creds_manager
-        .store(&creds)
-        .map_err(|e| e.to_string())
+    state.creds_manager.store(&creds).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn test_connection(state: State<'_, AppState>) -> Result<(), String> {
     let config = state.config_parser.load().map_err(|e| e.to_string())?;
-    let creds = state
-        .creds_manager
-        .load()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Credenciais AWS não configuradas.".to_string())?;
+    let mut creds = if config.use_iam_role {
+        AwsCredentials {
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            session_token: None,
+            region: config.aws_region.clone(),
+            use_iam_role: true,
+        }
+    } else {
+        state
+            .creds_manager
+            .load()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Credenciais AWS não configuradas.".to_string())?
+    };
+    creds.region = config.aws_region.clone();
 
     let client = S3Client::new_with_options(
         &creds,
@@ -173,7 +195,24 @@ fn delete_credentials(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn start_sync(state: State<'_, AppState>) -> Result<(), String> {
+    let _lifecycle = state.primary_lifecycle.lock().await;
+    if state.sync_engine.is_running() {
+        return Ok(());
+    }
     let config = state.config_parser.load().map_err(|e| e.to_string())?;
+    {
+        let _configuration = state.buckets.lock_configuration();
+        state.buckets.check_primary(&config)?;
+    }
+    start_engine(&state.sync_engine, &state.creds_manager, config, &state.db).await
+}
+
+async fn start_engine(
+    engine: &Arc<SyncEngine>,
+    credentials: &CredentialsManager,
+    config: AppConfig,
+    db: &Database,
+) -> Result<(), String> {
     if let Err(errs) = ConfigParser::validate(&config) {
         let msg = errs
             .iter()
@@ -183,7 +222,23 @@ async fn start_sync(state: State<'_, AppState>) -> Result<(), String> {
         return Err(msg);
     }
 
-    let creds = if config.use_iam_role {
+    let s3_client = sync_client(credentials, &config, Some(db.clone())).await?;
+    engine.reload_config(config);
+    engine.set_s3_client(s3_client);
+
+    if let Err(error) = engine.start().await {
+        let _ = engine.stop().await;
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+async fn sync_client(
+    credentials: &CredentialsManager,
+    config: &AppConfig,
+    db: Option<Database>,
+) -> Result<S3Client, String> {
+    let mut creds = if config.use_iam_role {
         AwsCredentials {
             access_key_id: String::new(),
             secret_access_key: String::new(),
@@ -192,13 +247,13 @@ async fn start_sync(state: State<'_, AppState>) -> Result<(), String> {
             use_iam_role: true,
         }
     } else {
-        state
-            .creds_manager
+        credentials
             .load()
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Credenciais AWS não configuradas.".to_string())?
     };
 
+    creds.region = config.aws_region.clone();
     if let Err(errs) = CredentialsManager::validate_format(&creds) {
         let msg = errs
             .iter()
@@ -208,10 +263,10 @@ async fn start_sync(state: State<'_, AppState>) -> Result<(), String> {
         return Err(msg);
     }
 
-    let s3_client = S3Client::new_with_options(
+    let client = S3Client::new_with_options(
         &creds,
         config.bucket_name.clone(),
-        Some(state.db.clone()),
+        db,
         config.endpoint_url.clone(),
         config.force_path_style,
     )
@@ -220,14 +275,12 @@ async fn start_sync(state: State<'_, AppState>) -> Result<(), String> {
     .with_storage_options(&config.storage_class, config.server_side_encryption)
     .with_bandwidth_limit(config.bandwidth_limit_kbps);
 
-    state.sync_engine.reload_config(config);
-    state.sync_engine.set_s3_client(s3_client);
-
-    state.sync_engine.start().await.map_err(|e| e.to_string())
+    Ok(client)
 }
 
 #[tauri::command]
 async fn stop_sync(state: State<'_, AppState>) -> Result<(), String> {
+    let _lifecycle = state.primary_lifecycle.lock().await;
     state.sync_engine.stop().await.map_err(|e| e.to_string())
 }
 
@@ -239,6 +292,11 @@ fn get_sync_status(state: State<'_, AppState>) -> Vec<FileStatus> {
 #[tauri::command]
 fn get_global_state(state: State<'_, AppState>) -> GlobalSyncState {
     state.sync_engine.status_monitor().global_state()
+}
+
+#[tauri::command]
+fn get_sync_running(state: State<'_, AppState>) -> bool {
+    state.sync_engine.is_running()
 }
 
 #[tauri::command]
@@ -264,13 +322,38 @@ fn resolve_conflict(
 }
 
 #[tauri::command]
+fn get_deletion_reviews(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::models::DeletionReview>, String> {
+    state
+        .sync_engine
+        .deletion_reviews()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn resolve_deletion(
+    review: crate::models::DeletionReview,
+    restore: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .sync_engine
+        .resolve_deletion(&review, restore)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn open_path_dialog() -> Result<Option<String>, String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         let script = r#"
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
 $dlg.Description = "Selecione a pasta local para o Amazon S3 Drive"
 $dlg.ShowNewFolderButton = $true
@@ -278,23 +361,27 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dlg.SelectedPath
 }
 "#;
-        if let Ok(output) = std::process::Command::new("powershell")
+        let output = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Sta", "-Command", script])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-        {
-            let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !selected.is_empty() {
-                return Ok(Some(selected));
-            }
-            return Ok(None);
+            .map_err(|_| "Não foi possível abrir o seletor de pastas.")?;
+        if !output.status.success() {
+            return Err("Não foi possível abrir o seletor de pastas.".into());
         }
+        let selected = String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        Ok((!selected.is_empty()).then_some(selected))
     }
 
-    let default_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("S3Drive");
-    Ok(Some(default_dir.to_string_lossy().to_string()))
+    #[cfg(not(target_os = "windows"))]
+    {
+        let default_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("S3Drive");
+        Ok(Some(default_dir.to_string_lossy().to_string()))
+    }
 }
 
 #[tauri::command]
@@ -575,7 +662,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 #[tauri::command]
-fn import_config_profile(state: State<'_, AppState>) -> Result<Option<AppConfig>, String> {
+fn import_config_profile() -> Result<Option<AppConfig>, String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -602,11 +689,13 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             let mut imported: AppConfig =
                 serde_json::from_str(&raw).map_err(|e| format!("JSON inválido: {}", e))?;
             imported.notifications.error_enabled = true;
-            state
-                .config_parser
-                .save(&imported)
-                .map_err(|e| e.to_string())?;
-            state.sync_engine.reload_config(imported.clone());
+            ConfigParser::validate(&imported).map_err(|errors| {
+                errors
+                    .iter()
+                    .map(|error| error.reason.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })?;
             return Ok(Some(imported));
         }
     }
@@ -668,6 +757,35 @@ fn get_storage_analytics(state: State<'_, AppState>) -> Result<StorageAnalytics,
     Ok(state.sync_engine.compute_storage_analytics())
 }
 
+#[tauri::command]
+async fn get_s3_public_prices(state: State<'_, AppState>) -> Result<costs::PublicPrices, String> {
+    let config = state.sync_engine.get_config();
+    if config.endpoint_url.as_deref().is_some_and(|url| !url.trim().is_empty()) {
+        return Err("Tarifas AWS indisponíveis para endpoints personalizados.".into());
+    }
+    costs::public_prices(&config.aws_region, &config.storage_class).await
+}
+
+#[tauri::command]
+async fn get_s3_monthly_spend(state: State<'_, AppState>) -> Result<costs::MonthlySpend, String> {
+    let config = state.sync_engine.get_config();
+    if config.endpoint_url.as_deref().is_some_and(|url| !url.trim().is_empty()) {
+        return Err("Faturamento AWS indisponível para endpoints personalizados.".into());
+    }
+    let creds = if config.use_iam_role {
+        None
+    } else {
+        Some(
+            state
+                .creds_manager
+                .load()
+                .map_err(|_| "Credenciais AWS indisponíveis.")?
+                .ok_or("Credenciais AWS não configuradas.")?,
+        )
+    };
+    costs::monthly_spend(creds).await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -688,7 +806,7 @@ pub fn run() {
             let network_detector = NetworkDetector::new();
             let status_monitor = Arc::new(StatusMonitor::new(
                 Some(network_detector.clone()),
-                Some(app_dir),
+                Some(app_dir.clone()),
             ));
             let creds_manager = Arc::new(CredentialsManager::new());
 
@@ -708,11 +826,16 @@ pub fn run() {
 
             let _ = tray::setup_system_tray(app.handle(), status_monitor);
 
+            let buckets = Arc::new(buckets::BucketCatalog::new(db.clone(), app_dir)?);
+            buckets.restore_enabled(Arc::clone(&config_parser), Arc::clone(&creds_manager))?;
             app.manage(AppState {
                 sync_engine,
                 creds_manager,
                 config_parser,
                 db,
+                buckets,
+                primary_lifecycle: tokio::sync::Mutex::new(()),
+                site_publication: tokio::sync::Mutex::new(()),
             });
 
             Ok(())
@@ -728,8 +851,11 @@ pub fn run() {
             stop_sync,
             get_sync_status,
             get_global_state,
+            get_sync_running,
             get_queue_stats,
             resolve_conflict,
+            get_deletion_reviews,
+            resolve_deletion,
             open_path_dialog,
             open_local_folder,
             open_file_in_os,
@@ -753,6 +879,23 @@ pub fn run() {
             batch_resync_objects,
             batch_presigned_urls,
             get_storage_analytics,
+            get_s3_public_prices,
+            get_s3_monthly_spend,
+            buckets::list_sync_buckets,
+            buckets::discover_s3_buckets,
+            buckets::create_s3_bucket,
+            buckets::add_sync_bucket,
+            buckets::set_bucket_sync_enabled,
+            buckets::get_bucket_details,
+            buckets::get_bucket_deletions,
+            buckets::resolve_bucket_deletion,
+            buckets::resolve_bucket_conflict,
+            site_publisher::list_published_sites,
+            site_publisher::publish_site,
+            site_publisher::list_site_releases,
+            site_publisher::restore_site_release,
+            site_publisher::sources::browse_site_source,
+            site_publisher::sources::preview_site_source,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

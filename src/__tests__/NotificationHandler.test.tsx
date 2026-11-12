@@ -106,3 +106,34 @@ describe("NotificationHandler", () => {
     });
   });
 });
+
+describe("Conflict recovery", () => {
+  beforeEach(() => {
+    useSyncStore.getState().resetStore();
+    invokeMock.mockReset().mockResolvedValue(null);
+    useSyncStore.getState().addConflict({ file_name: "sample.txt", local_path: "/test/sample.txt", conflict_copy_path: "/test/sample-conflict.txt", local_modified: "2026-01-01", remote_modified: "2026-01-02", local_size_bytes: 10, remote_size_bytes: 20 });
+  });
+
+  it("keeps the conflict and allows retry after failure", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("failure"));
+    render(<NotificationHandler />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Manter local" })); });
+    expect(screen.getByTestId("notification-conflict-sample.txt")).toBeInTheDocument();
+    expect(screen.getByText(/Não foi possível resolver o conflito/)).toBeInTheDocument();
+    expect(useSyncStore.getState().conflicts).toHaveLength(1);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Manter local" })); });
+    expect(useSyncStore.getState().conflicts).toHaveLength(0);
+  });
+
+  it("disables all resolution choices while a request is pending", async () => {
+    let complete!: () => void;
+    invokeMock.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
+    render(<NotificationHandler />);
+    fireEvent.click(screen.getByRole("button", { name: "Manter local" }));
+    expect(screen.getByRole("button", { name: "Manter local" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Manter remota" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Manter ambas" })).toBeDisabled();
+    await act(async () => { complete(); });
+    expect(useSyncStore.getState().conflicts).toHaveLength(0);
+  });
+});

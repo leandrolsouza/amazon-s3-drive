@@ -1,0 +1,96 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Static site published by Amazon S3 Drive",
+  "Parameters": {
+    "BucketName": {
+      "Type": "String",
+      "AllowedPattern": "[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"
+    },
+    "Release": {
+      "Type": "String",
+      "Default": "pending",
+      "AllowedPattern": "pending|[a-f0-9]{32}"
+    }
+  },
+  "Conditions": {
+    "HasRelease": {"Fn::Not": [{"Fn::Equals": [{"Ref": "Release"}, "pending"]}]}
+  },
+  "Resources": {
+    "SiteBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {"Ref": "BucketName"},
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "OwnershipControls": {"Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]}
+      }
+    },
+    "SiteAccess": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Name": {"Fn::Select": [2, {"Fn::Split": ["/", {"Ref": "AWS::StackId"}]}]},
+          "OriginAccessControlOriginType": "s3",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "SiteDistribution": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Enabled": {"Fn::If": ["HasRelease", true, false]},
+          "DefaultRootObject": "index.html",
+          "Origins": [{
+            "Id": "site",
+            "DomainName": {"Fn::GetAtt": ["SiteBucket", "RegionalDomainName"]},
+            "OriginPath": {"Fn::Sub": "/releases/${Release}"},
+            "OriginAccessControlId": {"Fn::GetAtt": ["SiteAccess", "Id"]},
+            "S3OriginConfig": {"OriginAccessIdentity": ""}
+          }],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": "site",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+          },
+          "CustomErrorResponses": [
+            {"ErrorCode": 403, "ErrorCachingMinTTL": 0},
+            {"ErrorCode": 404, "ErrorCachingMinTTL": 0}
+          ]
+        }
+      }
+    },
+    "SitePolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {"Ref": "SiteBucket"},
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "cloudfront.amazonaws.com"},
+            "Action": "s3:GetObject",
+            "Resource": {"Fn::Sub": "${SiteBucket.Arn}/releases/*"},
+            "Condition": {
+              "StringEquals": {
+                "AWS:SourceArn": {"Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}"}
+              }
+            }
+          }]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "Bucket": {"Value": {"Ref": "SiteBucket"}},
+    "SiteUrl": {
+      "Condition": "HasRelease",
+      "Value": {"Fn::Sub": "https://${SiteDistribution.DomainName}/"}
+    }
+  }
+}

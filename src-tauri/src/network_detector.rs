@@ -4,11 +4,12 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct NetworkDetector {
     is_online: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
+    probe: Arc<Mutex<Option<CancellationToken>>>,
     callbacks: Arc<Mutex<Vec<Box<dyn Fn(bool) + Send + 'static>>>>,
 }
 
@@ -22,7 +23,7 @@ impl NetworkDetector {
     pub fn new() -> Self {
         Self {
             is_online: Arc::new(AtomicBool::new(true)),
-            running: Arc::new(AtomicBool::new(false)),
+            probe: Arc::new(Mutex::new(None)),
             callbacks: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -47,9 +48,12 @@ impl NetworkDetector {
 
     /// Inicia loop em background: tenta conexão TCP ao endpoint S3 a cada 10s (Requisito 8.1, 8.3)
     pub fn start(&self, s3_endpoint: &str) {
-        if self.running.swap(true, Ordering::SeqCst) {
+        let mut probe = self.probe.lock().unwrap();
+        if probe.is_some() {
             return;
         }
+        let cancel = CancellationToken::new();
+        *probe = Some(cancel.clone());
         let endpoint = if s3_endpoint.contains(':') {
             s3_endpoint.to_string()
         } else {
@@ -57,23 +61,39 @@ impl NetworkDetector {
         };
         let detector = self.clone();
         tokio::spawn(async move {
-            while detector.running.load(Ordering::SeqCst) {
-                let connected = tokio::time::timeout(
-                    Duration::from_secs(3),
-                    TcpStream::connect(&endpoint),
-                )
-                .await
-                .map(|r| r.is_ok())
-                .unwrap_or(false);
-
-                detector.set_online(connected);
-                tokio::time::sleep(Duration::from_secs(10)).await;
+            let probe_loop = async {
+                loop {
+                    let connected = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        TcpStream::connect(&endpoint),
+                    )
+                    .await
+                    .is_ok_and(|result| result.is_ok());
+                    {
+                        let _active = detector.probe.lock().unwrap();
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        detector.set_online(connected);
+                    }
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = probe_loop => {}
             }
         });
     }
 
     pub fn stop(&self) {
-        self.running.store(false, Ordering::SeqCst);
+        if let Some(cancel) = self.probe.lock().unwrap().take() {
+            cancel.cancel();
+        }
+    }
+
+    pub(crate) fn clear_callbacks(&self) {
+        self.callbacks.lock().unwrap().clear();
     }
 }
 

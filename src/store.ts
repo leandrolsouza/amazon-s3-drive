@@ -22,6 +22,10 @@ export interface SyncStoreState {
   errors: SyncErrorEvent[];
   initialCompleteCount: number | null;
   credentialAlert: string | null;
+  syncRunning: boolean | null;
+  syncAction: "starting" | "stopping" | null;
+  setSyncRunning: (running: boolean | null) => void;
+  setSyncAction: (action: "starting" | "stopping" | null) => void;
 
   setConfig: (config: AppConfig) => void;
   setGlobalState: (state: GlobalSyncState) => void;
@@ -50,10 +54,14 @@ const initialState = {
   errors: [],
   initialCompleteCount: null,
   credentialAlert: null,
+  syncRunning: null,
+  syncAction: null,
 };
 
 export const useSyncStore = create<SyncStoreState>((set) => ({
   ...initialState,
+  setSyncRunning: (syncRunning) => set({ syncRunning }),
+  setSyncAction: (syncAction) => set({ syncAction }),
 
   setConfig: (config) => set({ config }),
 
@@ -86,8 +94,14 @@ export const useSyncStore = create<SyncStoreState>((set) => ({
           },
         ];
       }
+      let transferProgress = prev.transferProgress;
+      if (state.type !== "Syncing" && Object.prototype.hasOwnProperty.call(transferProgress, path)) {
+        transferProgress = { ...transferProgress };
+        delete transferProgress[path];
+      }
       return {
         fileStatuses: nextStatuses,
+        transferProgress,
         globalState: computeFrontendGlobalState(nextStatuses, prev.isOnline),
       };
     }),

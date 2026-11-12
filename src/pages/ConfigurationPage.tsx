@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "../store";
+import { runSyncCommand } from "../syncCommands";
 import {
   AppConfig,
   AwsCredentials,
@@ -52,10 +53,17 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
 }) => {
   const storeConfig = useSyncStore((s) => s.config);
   const setStoreConfig = useSyncStore((s) => s.setConfig);
+  const syncAction = useSyncStore((s) => s.syncAction);
 
   const [config, setConfig] = useState<AppConfig>(
     initialConfig ?? storeConfig ?? DEFAULT_CONFIG
   );
+  const [savedConfig, setSavedConfig] = useState(initialConfig ?? storeConfig ?? DEFAULT_CONFIG);
+  const [firstSetup, setFirstSetup] = useState(() => !(initialConfig ?? storeConfig)?.bucket_name.trim() || !(initialConfig ?? storeConfig)?.local_path.trim());
+  const [setupStep, setSetupStep] = useState(0);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [credentialsSaved, setCredentialsSaved] = useState(false);
   const [creds, setCreds] = useState<AwsCredentials>({
     access_key_id: "",
     secret_access_key: "",
@@ -74,15 +82,13 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
   const [isTestingConn, setIsTestingConn] = useState(false);
 
   useEffect(() => {
-    if (initialConfig) {
-      setConfig(initialConfig);
-      return;
-    }
-    if (!storeConfig) {
+    if (!initialConfig && !storeConfig) {
       invoke<AppConfig | null>("get_config")
         .then((loaded) => {
           if (!loaded) return;
           setConfig(loaded);
+          setSavedConfig(loaded);
+          setFirstSetup(!loaded.bucket_name.trim() || !loaded.local_path.trim());
           setStoreConfig(loaded);
           setCreds((prev) => ({
             ...prev,
@@ -90,7 +96,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             use_iam_role: loaded.use_iam_role,
           }));
         })
-        .catch(() => {});
+        .catch(() => setErrorBanner("Não foi possível carregar a configuração. Reabra a tela para tentar novamente."));
     }
   }, [initialConfig, storeConfig, setStoreConfig]);
 
@@ -99,6 +105,13 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
 
   const canStartSync =
     config.bucket_name.trim().length > 0 && config.local_path.trim().length > 0;
+  const credentialsEdited = !config.use_iam_role && Boolean(creds.access_key_id || creds.secret_access_key || creds.session_token);
+  const isDirty = JSON.stringify(config) !== JSON.stringify(savedConfig) || credentialsEdited;
+  const busy = isSaving || isTestingConn || isValidating || syncAction !== null;
+
+  useEffect(() => {
+    if (isDirty) setStatusMessage(null);
+  }, [config, creds, isDirty]);
 
   const handleSelectPath = async () => {
     try {
@@ -120,11 +133,13 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       });
       if (errs && errs.length > 0) {
         setValidationErrors(errs);
+        setErrorBanner(errs.map((error) => error.reason).join(" "));
         return false;
       }
       setValidationErrors([]);
       await invoke("save_config", { config: cfgToSave });
       setStoreConfig(cfgToSave);
+      setSavedConfig(cfgToSave);
       setStatusMessage("Configuração gravada.");
       return true;
     } catch (e) {
@@ -153,8 +168,10 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
 
     try {
       await invoke("save_credentials", { creds: syncedCreds });
+      setCredentialsSaved(true);
       setValidationErrors([]);
-      setStatusMessage("Credenciais gravadas no Keyring do sistema.");
+      setCreds((previous) => ({ ...previous, access_key_id: "", secret_access_key: "", session_token: "" }));
+      setStatusMessage("Credenciais gravadas no gerenciador seguro do sistema.");
       return true;
     } catch (e) {
       setErrorBanner(String(e));
@@ -162,7 +179,30 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
     }
   };
 
+  const handleSaveAll = async () => {
+    if (isSaving) return false;
+    if (credentialsEdited) {
+      const errors = validateCredentialsFormat({ ...creds, region: config.aws_region, use_iam_role: config.use_iam_role });
+      if (errors.length) {
+        setValidationErrors(errors);
+        setErrorBanner("Revise os campos de autenticação antes de salvar.");
+        if (firstSetup) setSetupStep(0);
+        return false;
+      }
+    }
+    setIsSaving(true);
+    try {
+      if (!await handleSaveConfig(config)) return false;
+      if (credentialsEdited && !await handleSaveCredentials()) return false;
+      setStatusMessage("Alterações salvas.");
+      return true;
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleTestConnection = async () => {
+    if (isDirty || busy) return;
     setErrorBanner(null);
     setStatusMessage(null);
     setIsTestingConn(true);
@@ -177,21 +217,17 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
   };
 
   const handleStartSync = async () => {
-    if (!canStartSync) return;
+    if (!canStartSync || busy) return;
     setErrorBanner(null);
     setStatusMessage(null);
 
-    const saved = await handleSaveConfig(config);
+    const saved = await handleSaveAll();
     if (!saved) return;
 
-    if (!config.use_iam_role && creds.access_key_id) {
-      const credsSaved = await handleSaveCredentials();
-      if (!credsSaved) return;
-    }
-
     try {
-      await invoke("start_sync");
-      setStatusMessage("Sincronização ativa.");
+      await runSyncCommand("start_sync");
+      setStatusMessage(null);
+      setFirstSetup(false);
       onSyncStarted?.();
     } catch (e) {
       setErrorBanner(String(e));
@@ -243,7 +279,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
     }));
   };
 
-  const handleNotificationToggle = async (
+  const handleNotificationToggle = (
     field: "sync_complete_enabled" | "conflict_enabled",
     checked: boolean
   ) => {
@@ -256,12 +292,6 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       },
     };
     setConfig(updated);
-    try {
-      await invoke("save_config", { config: updated });
-      setStoreConfig(updated);
-    } catch {
-      // Ignore in test/offline
-    }
   };
 
   const handleExportProfile = async () => {
@@ -284,27 +314,56 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       const imported = await invoke<AppConfig | null>("import_config_profile");
       if (imported) {
         setConfig(imported);
-        setStoreConfig(imported);
-        setStatusMessage("Perfil de configuração importado e aplicado.");
+        setStatusMessage("Perfil carregado para revisão. Clique em Salvar alterações para aplicar.");
       }
     } catch (e) {
       setErrorBanner(String(e));
     }
   };
 
+  const handleNextStep = async () => {
+    if (busy) return;
+    setErrorBanner(null);
+    if (setupStep === 0) {
+      const errors: ValidationError[] = [];
+      if (!config.bucket_name.trim()) errors.push({ field: "bucket_name", reason: "Informe o bucket S3." });
+      errors.push(...validateCredentialsFormat({ ...creds, region: config.aws_region, use_iam_role: config.use_iam_role || (credentialsSaved && !credentialsEdited) }));
+      setValidationErrors(errors);
+      if (errors.length) { setErrorBanner("Revise os campos da conexão antes de continuar."); return; }
+      setIsValidating(true);
+      try {
+        const errors = await invoke<ValidationError[]>("validate_config", { config });
+        const connectionErrors = errors?.filter((error) => ["bucket_name", "aws_region", "endpoint_url"].includes(error.field)) || [];
+        if (connectionErrors.length) { setValidationErrors(connectionErrors); setErrorBanner(connectionErrors.map((error) => error.reason).join(" ")); return; }
+      } catch { setErrorBanner("Não foi possível validar a conexão. Tente continuar novamente."); return; }
+      finally { setIsValidating(false); }
+    } else {
+      if (!config.local_path.trim()) { setValidationErrors([{ field: "local_path", reason: "Escolha a pasta local." }]); return; }
+      setIsValidating(true);
+      try {
+        const errors = await invoke<ValidationError[]>("validate_config", { config });
+        if (errors?.length) { setValidationErrors(errors); setErrorBanner(errors.map((error) => error.reason).join(" ")); return; }
+      } catch { setErrorBanner("Não foi possível validar a configuração. Tente continuar novamente."); return; }
+      finally { setIsValidating(false); }
+    }
+    setValidationErrors([]);
+    setSetupStep((step) => Math.min(2, step + 1));
+  };
+
   return (
     <div className="pane-container">
       {/* Top Command Bar */}
-      <header className="command-bar">
+      <header className="command-bar settings-command-bar">
         <div className="command-bar-left">
-          <h2 className="pane-title">Preferências do Sistema</h2>
+          <h2 className="pane-title">{firstSetup ? "Configuração inicial" : "Preferências do Sistema"}</h2>
         </div>
         <div className="command-bar-right">
           <button
             type="button"
             className="btn-compact"
             onClick={handleImportProfile}
-            title="Importar perfil de configuração (.json)"
+            disabled={isDirty || busy}
+            title={isDirty ? "Salve ou descarte as alterações antes de importar outro perfil." : "Carregar perfil JSON para revisão"}
           >
             Importar JSON
           </button>
@@ -312,7 +371,8 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             type="button"
             className="btn-compact"
             onClick={handleExportProfile}
-            title="Exportar perfil de configuração (.json sem chaves secretas)"
+            disabled={isDirty || busy}
+            title={isDirty ? "Salve ou descarte as alterações antes de exportar." : "Exportar configuração salva (sem credenciais)"}
           >
             Exportar JSON
           </button>
@@ -320,17 +380,18 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           <button
             type="button"
             className="btn-compact"
-            onClick={() => handleSaveConfig(config)}
+            onClick={handleSaveAll}
+            disabled={busy || (firstSetup && setupStep !== 2)}
           >
-            Salvar Configuração
+            {isSaving ? "Salvando…" : "Salvar alterações"}
           </button>
           <button
             type="button"
             className="btn-primary-compact"
-            disabled={!canStartSync}
+            disabled={!canStartSync || busy || (firstSetup && setupStep !== 2)}
             onClick={handleStartSync}
           >
-            Iniciar Sync
+            {syncAction === "starting" ? "Conectando…" : isDirty || firstSetup ? "Salvar e iniciar" : "Iniciar sincronização"}
           </button>
         </div>
       </header>
@@ -346,11 +407,21 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
         </div>
       )}
 
+      <div className="settings-save-state" role="status">
+        {isDirty ? "Alterações não salvas" : firstSetup ? "Complete as etapas para configurar a sincronização" : "Todas as alterações estão salvas"}
+        {isDirty && <button type="button" className="btn-compact" disabled={busy} onClick={() => {
+          setConfig(savedConfig);
+          setCreds({ access_key_id: "", secret_access_key: "", session_token: "", region: savedConfig.aws_region, use_iam_role: savedConfig.use_iam_role });
+          setValidationErrors([]); setErrorBanner(null); setStatusMessage(null);
+        }}>Descartar alterações</button>}
+      </div>
       <div className="settings-scroll">
-        {/* Bloco 1: Mapeamento */}
-        <section className="settings-group">
-          <div className="settings-group-header">MAPEAMENTO DO VOLUME S3</div>
-
+        {firstSetup && <ol className="setup-steps" aria-label="Etapas da configuração inicial">
+          {["Conexão", "Pasta e direção", "Revisão e início"].map((label, index) => <li key={label} aria-current={setupStep === index ? "step" : undefined}>{index + 1}. {label}</li>)}
+        </ol>}
+        <fieldset className="settings-fields" disabled={busy}>
+        <section className="settings-group" hidden={firstSetup && setupStep !== 0}>
+          <div className="settings-group-header">CONEXÃO COM O S3</div>
           <div className="prop-row">
             <div className="prop-label-col">
               <label htmlFor="bucket_name">Nome do Bucket S3</label>
@@ -377,40 +448,6 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
               )}
             </div>
           </div>
-
-          <div className="prop-row">
-            <div className="prop-label-col">
-              <label htmlFor="local_path">Pasta Local</label>
-              <span className="prop-sub">Diretório espelhado no sistema</span>
-            </div>
-            <div className="prop-control-col">
-              <div className="control-inline">
-                <input
-                  id="local_path"
-                  className="mono"
-                  type="text"
-                  placeholder="C:\Users\Usuario\S3Drive"
-                  value={config.local_path}
-                  onChange={(e) =>
-                    setConfig({ ...config, local_path: e.target.value })
-                  }
-                />
-                <button
-                  type="button"
-                  className="btn-compact"
-                  onClick={handleSelectPath}
-                >
-                  Selecionar Pasta
-                </button>
-              </div>
-              {getFieldError("local_path") && (
-                <span className="field-error" data-testid="error-local_path">
-                  {getFieldError("local_path")}
-                </span>
-              )}
-            </div>
-          </div>
-
           <div className="prop-row">
             <div className="prop-label-col">
               <label htmlFor="aws_region">Região AWS</label>
@@ -457,105 +494,8 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
               )}
             </div>
           </div>
-
-          <div className="prop-row">
-            <div className="prop-label-col">
-              <label htmlFor="s3_prefix">Prefixo S3 (Opcional)</label>
-              <span className="prop-sub">Subdiretório remoto raiz</span>
-            </div>
-            <div className="prop-control-col">
-              <input
-                id="s3_prefix"
-                className="mono"
-                type="text"
-                placeholder="ex: equipe/financeiro/"
-                value={config.s3_prefix ?? ""}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    s3_prefix: e.target.value ? e.target.value : null,
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          <div className="prop-row">
-            <div className="prop-label-col">
-              <label htmlFor="sync_interval_secs">
-                Intervalo de Sync (seg)
-              </label>
-              <span className="prop-sub">Frequência de polling (1–60s)</span>
-            </div>
-            <div className="prop-control-col">
-              <input
-                id="sync_interval_secs"
-                className="mono input-xs"
-                type="number"
-                min={1}
-                max={60}
-                value={config.sync_interval_secs}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    sync_interval_secs: Number(e.target.value) || 60,
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          <div className="prop-row">
-            <div className="prop-label-col">
-              <label htmlFor="max_concurrent_transfers">
-                Transferências Simultâneas
-              </label>
-              <span className="prop-sub">Worker pool paralelo (1–16)</span>
-            </div>
-            <div className="prop-control-col">
-              <div className="control-inline">
-                <input
-                  id="max_concurrent_transfers"
-                  className="mono input-xs"
-                  type="number"
-                  min={1}
-                  max={16}
-                  value={config.max_concurrent_transfers ?? 4}
-                  onChange={(e) =>
-                    setConfig({
-                      ...config,
-                      max_concurrent_transfers: Math.max(
-                        1,
-                        Math.min(16, Number(e.target.value) || 4)
-                      ),
-                    })
-                  }
-                />
-                <div className="preset-tags">
-                  {[1, 4, 8, 12].map((w) => (
-                    <button
-                      key={w}
-                      type="button"
-                      className={`tag-btn mono ${
-                        (config.max_concurrent_transfers ?? 4) === w
-                          ? "tag-btn-active"
-                          : ""
-                      }`}
-                      onClick={() =>
-                        setConfig({
-                          ...config,
-                          max_concurrent_transfers: w,
-                        })
-                      }
-                    >
-                      {w}x
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
+          <details className="settings-advanced" open={Boolean(getFieldError("endpoint_url")) || undefined}>
+            <summary>Conexão avançada (endpoint personalizado)</summary>
           <div className="prop-row">
             <div className="prop-label-col">
               <label htmlFor="endpoint_url">Endpoint S3 Customizado</label>
@@ -600,180 +540,19 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
               )}
             </div>
           </div>
-
-          <div className="prop-row">
-            <div className="prop-label-col">
-              <label htmlFor="sync_direction">Direção de Sincronização</label>
-              <span className="prop-sub">
-                Modo de espelhamento entre Pasta Local e Bucket S3
-              </span>
-            </div>
-            <div className="prop-control-col">
-              <div className="preset-tags">
-                {[
-                  {
-                    id: "Bidirectional",
-                    label: "Bidirecional (Local ↔ S3)",
-                  },
-                  {
-                    id: "UploadOnly",
-                    label: "Backup (Apenas Upload → S3)",
-                  },
-                  {
-                    id: "DownloadOnly",
-                    label: "Espelho (Apenas Download ← S3)",
-                  },
-                ].map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    className={`tag-btn mono ${
-                      (config.sync_direction ?? "Bidirectional") === mode.id
-                        ? "tag-btn-active"
-                        : ""
-                    }`}
-                    onClick={() =>
-                      setConfig({
-                        ...config,
-                        sync_direction: mode.id,
-                      })
-                    }
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="prop-row">
-            <div className="prop-label-col">
-              <label htmlFor="storage_class">Storage Class & Segurança</label>
-              <span className="prop-sub">
-                Classe de armazenamento S3 e criptografia SSE-S3
-              </span>
-            </div>
-            <div className="prop-control-col">
-              <div className="preset-tags">
-                {[
-                  { id: "STANDARD", label: "STANDARD" },
-                  { id: "INTELLIGENT_TIERING", label: "INTELLIGENT_TIERING" },
-                  { id: "STANDARD_IA", label: "STANDARD_IA" },
-                  { id: "GLACIER_IR", label: "GLACIER_IR" },
-                ].map((sc) => (
-                  <button
-                    key={sc.id}
-                    type="button"
-                    className={`tag-btn mono ${
-                      (config.storage_class ?? "STANDARD") === sc.id
-                        ? "tag-btn-active"
-                        : ""
-                    }`}
-                    onClick={() =>
-                      setConfig({
-                        ...config,
-                        storage_class: sc.id,
-                      })
-                    }
-                  >
-                    {sc.label}
-                  </button>
-                ))}
-              </div>
-              <label htmlFor="server_side_encryption" className="check-inline">
-                <input
-                  id="server_side_encryption"
-                  type="checkbox"
-                  checked={Boolean(config.server_side_encryption)}
-                  onChange={(e) =>
-                    setConfig({
-                      ...config,
-                      server_side_encryption: e.target.checked,
-                    })
-                  }
-                />
-                <span>
-                  Habilitar criptografia Server-Side AES-256 (SSE-S3) nos uploads
-                </span>
-              </label>
-            </div>
-          </div>
-
-          <div className="prop-row">
-            <div className="prop-label-col">
-              <label htmlFor="bandwidth_limit_kbps">
-                Limite de Banda (KB/s)
-              </label>
-              <span className="prop-sub">
-                0 = ilimitado (Throttling de rede)
-              </span>
-            </div>
-            <div className="prop-control-col">
-              <div className="control-inline">
-                <input
-                  id="bandwidth_limit_kbps"
-                  className="mono input-short"
-                  type="number"
-                  min={0}
-                  step={512}
-                  value={config.bandwidth_limit_kbps ?? 0}
-                  onChange={(e) =>
-                    setConfig({
-                      ...config,
-                      bandwidth_limit_kbps: Math.max(
-                        0,
-                        Number(e.target.value) || 0
-                      ),
-                    })
-                  }
-                />
-                <div className="preset-tags">
-                  {[
-                    { val: 0, label: "Ilimitado" },
-                    { val: 1024, label: "1 MB/s" },
-                    { val: 5120, label: "5 MB/s" },
-                    { val: 10240, label: "10 MB/s" },
-                  ].map((bw) => (
-                    <button
-                      key={bw.val}
-                      type="button"
-                      className={`tag-btn mono ${
-                        (config.bandwidth_limit_kbps ?? 0) === bw.val
-                          ? "tag-btn-active"
-                          : ""
-                      }`}
-                      onClick={() =>
-                        setConfig({
-                          ...config,
-                          bandwidth_limit_kbps: bw.val,
-                        })
-                      }
-                    >
-                      {bw.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+          </details>
         </section>
 
         {/* Bloco 2: Credenciais AWS */}
-        <section className="settings-group">
+        <section className="settings-group" hidden={firstSetup && setupStep !== 0}>
           <div className="settings-group-header">
             <span>AUTENTICAÇÃO AWS (OS KEYRING)</span>
             <div className="header-inline-actions">
               <button
                 type="button"
                 className="btn-compact"
-                onClick={handleSaveCredentials}
-              >
-                Salvar Credenciais
-              </button>
-              <button
-                type="button"
-                className="btn-compact"
-                disabled={isTestingConn}
+                disabled={busy || isDirty || firstSetup}
+                title="Testa a configuração salva. Salve as alterações antes de testar."
                 onClick={handleTestConnection}
               >
                 {isTestingConn ? "Verificando..." : "Testar Conexão"}
@@ -902,6 +681,313 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           )}
         </section>
 
+        <section className="settings-group" hidden={firstSetup && setupStep !== 1}>
+          <div className="settings-group-header">PASTA E DIREÇÃO</div>
+          <div className="prop-row">
+            <div className="prop-label-col">
+              <label htmlFor="local_path">Pasta Local</label>
+              <span className="prop-sub">Diretório espelhado no sistema</span>
+            </div>
+            <div className="prop-control-col">
+              <div className="control-inline">
+                <input
+                  id="local_path"
+                  className="mono"
+                  type="text"
+                  placeholder="C:\Users\Usuario\S3Drive"
+                  value={config.local_path}
+                  onChange={(e) =>
+                    setConfig({ ...config, local_path: e.target.value })
+                  }
+                />
+                <button
+                  type="button"
+                  className="btn-compact"
+                  onClick={handleSelectPath}
+                >
+                  Selecionar Pasta
+                </button>
+              </div>
+              {getFieldError("local_path") && (
+                <span className="field-error" data-testid="error-local_path">
+                  {getFieldError("local_path")}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="prop-row">
+            <div className="prop-label-col">
+              <label htmlFor="s3_prefix">Prefixo S3 (Opcional)</label>
+              <span className="prop-sub">Subdiretório remoto raiz</span>
+            </div>
+            <div className="prop-control-col">
+              <input
+                id="s3_prefix"
+                className="mono"
+                type="text"
+                placeholder="ex: equipe/financeiro/"
+                value={config.s3_prefix ?? ""}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    s3_prefix: e.target.value ? e.target.value : null,
+                  })
+                }
+              />
+            </div>
+          </div>
+          <div className="prop-row">
+            <div className="prop-label-col">
+              <label htmlFor="sync_direction">Direção de Sincronização</label>
+              <span className="prop-sub">
+                Modo de espelhamento entre Pasta Local e Bucket S3
+              </span>
+            </div>
+            <div className="prop-control-col">
+              <div className="preset-tags">
+                {[
+                  {
+                    id: "Bidirectional",
+                    label: "Bidirecional (Local ↔ S3)",
+                  },
+                  {
+                    id: "UploadOnly",
+                    label: "Backup (Apenas Upload → S3)",
+                  },
+                  {
+                    id: "DownloadOnly",
+                    label: "Espelho (Apenas Download ← S3)",
+                  },
+                ].map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    className={`tag-btn mono ${
+                      (config.sync_direction ?? "Bidirectional") === mode.id
+                        ? "tag-btn-active"
+                        : ""
+                    }`}
+                    onClick={() =>
+                      setConfig({
+                        ...config,
+                        sync_direction: mode.id,
+                      })
+                    }
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <p className="settings-note">{config.sync_direction === "UploadOnly" ? "Envia alterações da pasta local ao S3." : config.sync_direction === "DownloadOnly" ? "Baixa alterações do S3 para a pasta local." : "Propaga alterações entre a pasta local e o S3 nos dois sentidos."} Revise a pasta e o destino antes de iniciar.</p>
+        </section>
+
+        {firstSetup && setupStep === 2 && (
+          <section className="settings-group setup-review">
+            <h3>Revise antes de iniciar</h3>
+            <dl>
+              <dt>Destino S3</dt><dd className="mono">s3://{config.bucket_name}/{config.s3_prefix || ""}</dd>
+              <dt>Região</dt><dd>{config.aws_region}</dd>
+              <dt>Pasta local</dt><dd className="mono">{config.local_path}</dd>
+              <dt>Direção</dt><dd>{config.sync_direction === "UploadOnly" ? "Somente envio ao S3" : config.sync_direction === "DownloadOnly" ? "Somente download do S3" : "Bidirecional (Local ↔ S3)"}</dd>
+              <dt>Autenticação</dt><dd>{config.use_iam_role ? "IAM Role do ambiente" : "Chaves no gerenciador seguro do sistema"}</dd>
+            </dl>
+            <p>Ao salvar e iniciar, a conexão será verificada e a sincronização poderá alterar arquivos nos destinos indicados.</p>
+            <button type="button" className="btn-compact" disabled={busy || isDirty} onClick={handleTestConnection}>
+              {isTestingConn ? "Verificando…" : "Testar conexão salva"}
+            </button>
+            {isDirty && <p>Salve as alterações para testar a conexão antes de iniciar.</p>}
+          </section>
+        )}
+        <details className="settings-advanced" hidden={firstSetup && setupStep !== 2}>
+          <summary>Ajustes avançados de sincronização</summary>
+          <section className="settings-group">
+            <div className="settings-group-header">TRANSFERÊNCIAS E ARMAZENAMENTO</div>
+          <div className="prop-row">
+            <div className="prop-label-col">
+              <label htmlFor="sync_interval_secs">
+                Intervalo de Sync (seg)
+              </label>
+              <span className="prop-sub">Frequência de polling (1–60s)</span>
+            </div>
+            <div className="prop-control-col">
+              <input
+                id="sync_interval_secs"
+                className="mono input-xs"
+                type="number"
+                min={1}
+                max={60}
+                value={config.sync_interval_secs}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    sync_interval_secs: Number(e.target.value) || 60,
+                  })
+                }
+              />
+            </div>
+          </div>
+          <div className="prop-row">
+            <div className="prop-label-col">
+              <label htmlFor="max_concurrent_transfers">
+                Transferências Simultâneas
+              </label>
+              <span className="prop-sub">Worker pool paralelo (1–16)</span>
+            </div>
+            <div className="prop-control-col">
+              <div className="control-inline">
+                <input
+                  id="max_concurrent_transfers"
+                  className="mono input-xs"
+                  type="number"
+                  min={1}
+                  max={16}
+                  value={config.max_concurrent_transfers ?? 4}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      max_concurrent_transfers: Math.max(
+                        1,
+                        Math.min(16, Number(e.target.value) || 4)
+                      ),
+                    })
+                  }
+                />
+                <div className="preset-tags">
+                  {[1, 4, 8, 12].map((w) => (
+                    <button
+                      key={w}
+                      type="button"
+                      className={`tag-btn mono ${
+                        (config.max_concurrent_transfers ?? 4) === w
+                          ? "tag-btn-active"
+                          : ""
+                      }`}
+                      onClick={() =>
+                        setConfig({
+                          ...config,
+                          max_concurrent_transfers: w,
+                        })
+                      }
+                    >
+                      {w}x
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="prop-row">
+            <div className="prop-label-col">
+              <label htmlFor="storage_class">Storage Class & Segurança</label>
+              <span className="prop-sub">
+                Classe de armazenamento S3 e criptografia SSE-S3
+              </span>
+            </div>
+            <div className="prop-control-col">
+              <div className="preset-tags">
+                {[
+                  { id: "STANDARD", label: "STANDARD" },
+                  { id: "INTELLIGENT_TIERING", label: "INTELLIGENT_TIERING" },
+                  { id: "STANDARD_IA", label: "STANDARD_IA" },
+                  { id: "GLACIER_IR", label: "GLACIER_IR" },
+                ].map((sc) => (
+                  <button
+                    key={sc.id}
+                    type="button"
+                    className={`tag-btn mono ${
+                      (config.storage_class ?? "STANDARD") === sc.id
+                        ? "tag-btn-active"
+                        : ""
+                    }`}
+                    onClick={() =>
+                      setConfig({
+                        ...config,
+                        storage_class: sc.id,
+                      })
+                    }
+                  >
+                    {sc.label}
+                  </button>
+                ))}
+              </div>
+              <label htmlFor="server_side_encryption" className="check-inline">
+                <input
+                  id="server_side_encryption"
+                  type="checkbox"
+                  checked={Boolean(config.server_side_encryption)}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      server_side_encryption: e.target.checked,
+                    })
+                  }
+                />
+                <span>
+                  Habilitar criptografia Server-Side AES-256 (SSE-S3) nos uploads
+                </span>
+              </label>
+            </div>
+          </div>
+          <div className="prop-row">
+            <div className="prop-label-col">
+              <label htmlFor="bandwidth_limit_kbps">
+                Limite de Banda (KB/s)
+              </label>
+              <span className="prop-sub">
+                0 = ilimitado (Throttling de rede)
+              </span>
+            </div>
+            <div className="prop-control-col">
+              <div className="control-inline">
+                <input
+                  id="bandwidth_limit_kbps"
+                  className="mono input-short"
+                  type="number"
+                  min={0}
+                  step={512}
+                  value={config.bandwidth_limit_kbps ?? 0}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      bandwidth_limit_kbps: Math.max(
+                        0,
+                        Number(e.target.value) || 0
+                      ),
+                    })
+                  }
+                />
+                <div className="preset-tags">
+                  {[
+                    { val: 0, label: "Ilimitado" },
+                    { val: 1024, label: "1 MB/s" },
+                    { val: 5120, label: "5 MB/s" },
+                    { val: 10240, label: "10 MB/s" },
+                  ].map((bw) => (
+                    <button
+                      key={bw.val}
+                      type="button"
+                      className={`tag-btn mono ${
+                        (config.bandwidth_limit_kbps ?? 0) === bw.val
+                          ? "tag-btn-active"
+                          : ""
+                      }`}
+                      onClick={() =>
+                        setConfig({
+                          ...config,
+                          bandwidth_limit_kbps: bw.val,
+                        })
+                      }
+                    >
+                      {bw.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+          </section>
         {/* Bloco 3: Filtros de Exclusão Glob */}
         <section className="settings-group">
           <div className="settings-group-header">
@@ -1056,6 +1142,12 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             </div>
           </div>
         </section>
+        </details>
+        </fieldset>
+        {firstSetup && <div className="setup-actions">
+          <button type="button" className="btn-compact" disabled={setupStep === 0 || busy} onClick={() => { setSetupStep((step) => step - 1); setValidationErrors([]); setErrorBanner(null); }}>Voltar</button>
+          {setupStep < 2 && <button type="button" className="btn-primary-compact" disabled={busy} onClick={handleNextStep}>Continuar</button>}
+        </div>}
       </div>
     </div>
   );

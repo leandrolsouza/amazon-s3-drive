@@ -1,5 +1,14 @@
 # Requirements Document
 
+## Reconciliação de exclusões (complemento)
+
+- Em modo bidirecional, comparar o registro da última sincronização com o estado local e a listagem S3, inclusive após reinicialização. Ausência de arquivo conhecido representa uma exclusão pendente, não um novo download.
+- Exclusões detectadas pelo monitor ou pela reconciliação exigem confirmação. Oferecer restauração e confirmação individual; permitir confirmação em lote apenas para exclusões sem conflito.
+- Exclusão de um lado e edição do outro constituem conflito. Preservar a versão existente até uma decisão explícita; revalidar a revisão apresentada e os conteúdos antes de executar.
+- Persistir pendências entre sessões. Falhas mantêm a pendência e o histórico para nova tentativa. Se ambos os lados já foram excluídos, limpar o registro.
+- Antes de propagar uma exclusão, preservar a versão restante em `.s3-drive-trash` no lado de destino. Essas cópias não são sincronizadas e não têm expiração automática; a recuperação é manual. Operações explícitas de exclusão pela tela de arquivos mantêm seu fluxo próprio de confirmação.
+- Pasta raiz indisponível e erros de leitura ou listagem não devem ser interpretados como exclusão. Respeitar padrões de exclusão e os modos UploadOnly/DownloadOnly.
+
 ## Introduction
 
 O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no computador do usuário, conectado a um bucket Amazon S3. Inspirado em aplicações como o Google Drive, o aplicativo sincroniza arquivos de forma bidirecional entre o sistema de arquivos local e o S3, permitindo acesso transparente aos arquivos como se fossem pastas locais do sistema operacional. O aplicativo roda em segundo plano, monitora alterações em ambos os lados e garante consistência dos dados com suporte a operações offline e resolução de conflitos.
@@ -47,7 +56,7 @@ O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no comput
 2. WHEN um arquivo é modificado na Pasta_Local, THE Sync_Engine SHALL enviar o arquivo atualizado para o S3_Bucket em até 30 segundos após a conclusão da escrita
 3. WHEN um arquivo é renomeado na Pasta_Local, THE Sync_Engine SHALL copiar o arquivo para o novo caminho no S3_Bucket e excluir o objeto original em até 30 segundos
 4. WHEN um arquivo é movido entre diretórios na Pasta_Local, THE Sync_Engine SHALL copiar o objeto para o novo caminho no S3_Bucket e excluir o objeto original em até 30 segundos
-5. WHEN um arquivo é excluído da Pasta_Local, THE Sync_Engine SHALL excluir o objeto correspondente do S3_Bucket em até 30 segundos
+5. WHEN um arquivo conhecido é excluído da Pasta_Local em modo bidirecional, THE Sync_Engine SHALL apresentar uma revisão persistida para restaurar o arquivo ou confirmar a exclusão no S3_Bucket, preservando uma cópia para recuperação antes da remoção
 6. WHEN um arquivo maior que 100MB é enviado, THE S3_Client SHALL utilizar multipart upload com partes de no mínimo 5MB cada, exceto a última parte
 7. IF uma transferência de upload é interrompida, THEN THE Sync_Engine SHALL retomar o upload a partir da última parte concluída com sucesso em até 3 tentativas, mantendo o estado de retomada por no máximo 24 horas
 8. WHEN um upload falha após 3 tentativas consecutivas, THE Sync_Engine SHALL marcar o arquivo com estado `erro` e notificar o usuário com o nome do arquivo e a descrição do erro
@@ -63,7 +72,7 @@ O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no comput
 
 1. WHEN um objeto é criado no S3_Bucket por uma fonte externa, THE Sync_Engine SHALL baixar o arquivo para a Pasta_Local em até 60 segundos após a detecção, substituindo qualquer versão local existente
 2. WHEN um objeto é modificado no S3_Bucket por uma fonte externa, THE Sync_Engine SHALL baixar a versão atualizada para a Pasta_Local em até 60 segundos após a detecção, substituindo o arquivo local existente
-3. WHEN um objeto é excluído do S3_Bucket por uma fonte externa, THE Sync_Engine SHALL remover o arquivo correspondente da Pasta_Local em até 60 segundos após a detecção
+3. WHEN um objeto conhecido é excluído do S3_Bucket por uma fonte externa em modo bidirecional, THE Sync_Engine SHALL apresentar uma revisão persistida para restaurar o objeto ou confirmar a remoção local, sinalizando conflito se o conteúdo local mudou e preservando uma cópia antes de remover
 4. THE Sync_Engine SHALL verificar alterações no S3_Bucket em intervalos de no máximo 60 segundos utilizando polling da API S3
 5. IF um download é interrompido, THEN THE Sync_Engine SHALL retomar o download em até 3 tentativas com intervalo de 10 segundos entre cada tentativa
 6. WHEN um download é concluído, THE Sync_Engine SHALL validar a integridade do arquivo baixado comparando o checksum MD5 com o ETag do objeto S3
@@ -176,5 +185,38 @@ O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no comput
 
 1. WHEN a primeira sincronização completa dos arquivos do bucket é concluída com sucesso, THE Notification_Service SHALL exibir uma notificação ao usuário informando o número de arquivos sincronizados, visível por no mínimo 5 segundos
 2. WHEN um erro de sincronização ocorre após 3 tentativas consecutivas com falha, THE Notification_Service SHALL exibir uma notificação persistente com o nome do arquivo e a descrição do erro, que permanece visível até que o usuário a dispense manualmente
-3. WHEN um conflito de arquivo é detectado, THE Notification_Service SHALL exibir uma notificação persistente com o nome do arquivo em conflito e as opções: manter versão local, manter versão remota ou manter ambas as versões, que permanece visível até que uma opção seja selecionada
+3. WHEN um conflito de arquivo é detectado, THE Notification_Service SHALL exibir uma notificação persistente com o nome do arquivo em conflito e as opções: manter versão local, manter versão remota ou manter ambas as versões, que permanece visível até que a resolução seja concluída com sucesso. Em caso de falha, SHALL preservar o conflito, informar o erro e permitir nova tentativa; durante a resolução, SHALL desabilitar as opções desse conflito
 4. THE S3_Drive SHALL permitir ao usuário desativar nas configurações as notificações de conclusão de sincronização e de conflito de arquivo, sem desativar as notificações de erro
+5. WHEN o usuário solicita exclusão individual ou em lote, THE S3_Drive SHALL solicitar confirmação antes de executar qualquer exclusão, exibindo os arquivos, a quantidade, a pasta local, o bucket S3 e a consequência da remoção nos dois destinos. Cancelar SHALL preservar os arquivos; durante a execução, SHALL impedir confirmação duplicada
+6. WHEN iniciar/parar a sincronização, abrir a pasta local ou carregar/limpar logs falhar, THE S3_Drive SHALL exibir uma mensagem útil e permitir nova tentativa, preservando os registros existentes em caso de falha de atualização
+7. THE S3_Drive SHALL distinguir configuração ausente, estado indisponível, conexão em andamento, parada em andamento, motor parado, ausência de rede, erro e sincronização atualizada. O indicador de atividade SHALL consultar o estado real do motor, sem inferir atividade apenas dos estados dos arquivos ou da configuração salva
+8. WHEN as credenciais forem inválidas ou expiradas, THE S3_Drive SHALL manter o alerta com acesso às configurações até uma inicialização de sincronização bem-sucedida
+
+---
+
+### Requisito 11: Configuração e navegação desktop
+
+**User Story:** Como usuário, quero configurar a sincronização com orientação e controlar quando minhas alterações são aplicadas.
+
+#### Critérios de Aceitação
+
+1. WHEN a aplicação inicia com bucket e pasta local previamente configurados, THE S3_Drive SHALL abrir a tela de sincronização; caso contrário, SHALL abrir a configuração inicial. Uma falha ao ler a configuração SHALL permitir nova tentativa sem substituir a configuração salva.
+2. THE S3_Drive SHALL organizar a configuração inicial nas etapas Conexão, Pasta e direção e Revisão e início, preservando os valores ao voltar. SHALL validar os campos antes de avançar e mostrar os destinos e a direção antes de iniciar.
+3. THE S3_Drive SHALL recolher ajustes avançados e indicar alterações não salvas. Notificações e demais preferências SHALL ser aplicadas apenas por uma ação explícita de salvar; Salvar e iniciar SHALL salvar antes de iniciar. Uma falha SHALL preservar as edições pendentes.
+4. THE S3_Drive SHALL preservar o rascunho ao alternar entre telas e permitir descartar alterações explicitamente. Credenciais digitadas SHALL permanecer apenas na memória da tela até seu salvamento no gerenciador seguro e SHALL ser limpas dos campos após salvamento bem-sucedido.
+5. WHEN um perfil JSON é importado, THE S3_Drive SHALL carregar uma configuração validada para revisão sem persistir ou aplicar automaticamente. Exportação e teste de conexão SHALL usar a configuração salva, exigindo que alterações pendentes sejam salvas ou descartadas primeiro.
+6. THE S3_Drive SHALL fazer o filtro Ativos mostrar todos os arquivos pendentes ou em sincronização, correspondendo ao contador apresentado.
+
+### Requisito 12 — Publicação de site estático
+
+1. A tela Sites permite escolher uma pasta local ou navegar pelas pastas do bucket sincronizado. A pasta escolhida precisa de `index.html` na raiz. Antes de publicar, o usuário revisa os arquivos, pode retirar itens e vê o tamanho total, o destino, o aviso de acesso público e a possibilidade de custos na AWS.
+2. **Criar outro site** cria um bucket privado dedicado e uma distribuição HTTPS no CloudFront. O nome do bucket é editável e sugerido a partir da pasta. A interface permite escolher outro nome em caso de conflito e copiar o link de cada site publicado.
+3. **Republicar** ativa a nova versão no endereço do site selecionado. **Restaurar versão** reativa uma versão registrada no mesmo endereço após confirmação. Alterações na origem entram no ar mediante uma nova publicação.
+4. A tela exibe progresso e falhas da AWS. Uma falha durante o envio preserva a versão anterior. Conexões com endpoint S3 personalizado ficam indisponíveis para publicação.
+
+### Requisito 13 — Sincronização de múltiplos buckets
+
+1. O usuário pode adicionar buckets existentes com a conexão AWS configurada e escolher região, pasta local e prefixo para cada vínculo.
+2. Os vínculos podem sincronizar simultaneamente. Cada vínculo adicional tem controles de início e pausa e mostra sua atividade e revisões de exclusão. O estado habilitado persiste entre sessões.
+3. O cadastro rejeita buckets duplicados e pastas locais sobrepostas. A atualização preserva a configuração e o estado do bucket principal.
+4. O usuário pode criar um bucket privado no Amazon S3 informando nome e região e configurar sua sincronização depois.

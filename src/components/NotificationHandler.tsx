@@ -1,9 +1,12 @@
-import React, { useEffect } from "react";
+import { Icon } from "./Icon";
+import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "../store";
 import { ConflictEvent } from "../types";
 
-export const NotificationHandler: React.FC = () => {
+export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ onOpenConfig }) => {
+  const [resolutionErrors, setResolutionErrors] = useState<Record<string, string>>({});
+  const [resolving, setResolving] = useState<Record<string, boolean>>({});
   const config = useSyncStore((s) => s.config);
   const conflicts = useSyncStore((s) => s.conflicts);
   const errors = useSyncStore((s) => s.errors);
@@ -13,7 +16,6 @@ export const NotificationHandler: React.FC = () => {
   const removeConflict = useSyncStore((s) => s.removeConflict);
   const dismissError = useSyncStore((s) => s.dismissError);
   const setInitialCompleteCount = useSyncStore((s) => s.setInitialCompleteCount);
-  const setCredentialAlert = useSyncStore((s) => s.setCredentialAlert);
 
   const syncCompleteEnabled =
     config?.notifications.sync_complete_enabled ?? true;
@@ -35,6 +37,9 @@ export const NotificationHandler: React.FC = () => {
     conflict: ConflictEvent,
     strategy: "local" | "remote" | "both"
   ) => {
+    if (resolving[conflict.local_path]) return;
+    setResolving((prev) => ({ ...prev, [conflict.local_path]: true }));
+    setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: "" }));
     try {
       if (strategy === "local" || strategy === "remote") {
         await invoke("resolve_conflict", {
@@ -43,8 +48,11 @@ export const NotificationHandler: React.FC = () => {
           conflictPath: conflict.conflict_copy_path,
         });
       }
-    } finally {
       removeConflict(conflict.local_path);
+    } catch {
+      setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: "Não foi possível resolver o conflito. Tente novamente escolhendo uma opção abaixo." }));
+    } finally {
+      setResolving((prev) => ({ ...prev, [conflict.local_path]: false }));
     }
   };
 
@@ -58,9 +66,7 @@ export const NotificationHandler: React.FC = () => {
           className="notification-card notification-error"
         >
           <p>{credentialAlert}</p>
-          <button type="button" onClick={() => setCredentialAlert(null)}>
-            Dispensar
-          </button>
+          {onOpenConfig && <button type="button" onClick={onOpenConfig}>Revisar credenciais</button>}
         </div>
       )}
 
@@ -77,9 +83,11 @@ export const NotificationHandler: React.FC = () => {
           </p>
           <button
             type="button"
+            className="toast-close"
+            title="Fechar"
             onClick={() => setInitialCompleteCount(null)}
           >
-            Fechar
+            <Icon name="close" /><span className="sr-only">Fechar</span>
           </button>
         </div>
       )}
@@ -117,22 +125,27 @@ export const NotificationHandler: React.FC = () => {
               bytes) | Remoto: {conflict.remote_modified} (
               {conflict.remote_size_bytes} bytes)
             </p>
+            {resolutionErrors[conflict.local_path] && <p role="alert">{resolutionErrors[conflict.local_path]}</p>}
+            {resolving[conflict.local_path] && <p role="status">Resolvendo conflito…</p>}
             <div className="conflict-actions">
               <button
                 type="button"
                 onClick={() => handleResolveConflict(conflict, "local")}
+                disabled={resolving[conflict.local_path]}
               >
                 Manter local
               </button>
               <button
                 type="button"
                 onClick={() => handleResolveConflict(conflict, "remote")}
+                disabled={resolving[conflict.local_path]}
               >
                 Manter remota
               </button>
               <button
                 type="button"
                 onClick={() => handleResolveConflict(conflict, "both")}
+                disabled={resolving[conflict.local_path]}
               >
                 Manter ambas
               </button>

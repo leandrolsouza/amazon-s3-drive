@@ -21,6 +21,10 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+#[path = "deletion_review.rs"]
+mod deletion_review;
 
 pub trait EventEmitter: Send + Sync {
     fn emit_json(&self, event: &str, payload: serde_json::Value);
@@ -104,6 +108,24 @@ pub fn s3_key_to_local_path(key: &str, base: &Path) -> PathBuf {
     result
 }
 
+fn path_within_sync_folder(path: &Path, base: &Path) -> bool {
+    if !path.starts_with(base) {
+        return false;
+    }
+    let Ok(root) = base.canonicalize() else {
+        return false;
+    };
+    for ancestor in path.ancestors().take_while(|ancestor| *ancestor != base) {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return false,
+            Ok(_) => return ancestor.canonicalize().is_ok_and(|path| path.starts_with(&root)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// Substitui separador do SO por "/" e normaliza separadores consecutivos (Requisito 1.4)
 pub fn local_path_to_s3_key(path: &Path, base: &Path) -> String {
     let relative = path.strip_prefix(base).unwrap_or(path);
@@ -131,7 +153,7 @@ pub fn normalize_key(key: &str) -> String {
 pub fn apply_s3_prefix(key: String, prefix: &Option<String>) -> String {
     if let Some(ref p) = prefix {
         let clean = p.trim_matches('/');
-        if !clean.is_empty() && !key.starts_with(clean) {
+        if !clean.is_empty() {
             return format!("{}/{}", clean, key);
         }
     }
@@ -147,7 +169,11 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
         config.local_path.trim(),
         config.s3_prefix.as_deref().unwrap_or("").trim_matches('/'),
         config.aws_region.trim(),
-        config.endpoint_url.as_deref().unwrap_or("").trim_matches('/')
+        config
+            .endpoint_url
+            .as_deref()
+            .unwrap_or("")
+            .trim_matches('/')
     )
 }
 
@@ -182,6 +208,9 @@ pub struct SyncEngine {
     active_transfers: Arc<AtomicUsize>,
     retry_policy: RetryPolicy,
     watcher: Arc<Mutex<Option<FileWatcher>>>,
+    reconciliation_lock: tokio::sync::Mutex<()>,
+    worker: tokio::sync::Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
+    stopping: AtomicBool,
 }
 
 impl SyncEngine {
@@ -207,6 +236,9 @@ impl SyncEngine {
             active_transfers: Arc::new(AtomicUsize::new(0)),
             retry_policy: RetryPolicy::default(),
             watcher: Arc::new(Mutex::new(None)),
+            reconciliation_lock: tokio::sync::Mutex::new(()),
+            worker: tokio::sync::Mutex::new(None),
+            stopping: AtomicBool::new(false),
         }
     }
 
@@ -237,6 +269,10 @@ impl SyncEngine {
         self.config.read().unwrap().clone()
     }
 
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
     pub fn status_monitor(&self) -> Arc<StatusMonitor> {
         Arc::clone(&self.status_monitor)
     }
@@ -260,6 +296,10 @@ impl SyncEngine {
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<(), SyncError> {
+        let mut worker = self.worker.lock().await;
+        if worker.is_some() {
+            return Ok(());
+        }
         let cfg = self.get_config();
         if cfg.local_path.trim().is_empty() {
             return Err(SyncError::Config(
@@ -268,6 +308,18 @@ impl SyncEngine {
         }
 
         let local_dir = PathBuf::from(&cfg.local_path);
+        if self.db.get_config_fingerprint().ok().flatten().as_deref()
+            == Some(config_fingerprint(&cfg).as_str())
+            && !self
+                .db
+                .list_file_entries()
+                .map_err(|e| SyncError::Queue(e.to_string()))?
+                .is_empty()
+        {
+            fs::read_dir(&local_dir).map_err(|_| SyncError::Io(
+                "A pasta sincronizada está indisponível. Reconecte o disco ou restaure a pasta antes de sincronizar.".into()
+            ))?;
+        }
         // Requisito 1.1 e 1.6: criar Pasta_Local se não existir; falhar se inválida/inacessível
         fs::create_dir_all(&local_dir).map_err(|e| {
             SyncError::Io(format!(
@@ -280,13 +332,14 @@ impl SyncEngine {
         // Requisito 1.7 e 4.6: testar acesso ao bucket antes de iniciar
         let client_opt = self.s3_client.read().unwrap().clone();
         if let Some(client) = client_opt {
-            client.test_access().await.map_err(|e| {
+            client.test_prefix_access(cfg.s3_prefix.as_deref()).await.map_err(|e| {
                 self.emit_void("credentials:invalid");
                 SyncError::Credentials(format!(
                     "Falha ao acessar o bucket S3 '{}': {}",
                     cfg.bucket_name, e
                 ))
             })?;
+            self.network_detector.set_online(true);
         } else {
             return Err(SyncError::Credentials(
                 "Cliente S3 / credenciais não configurados.".to_string(),
@@ -305,21 +358,33 @@ impl SyncEngine {
         }
 
         self.running.store(true, Ordering::SeqCst);
+        self.initial_sync_done.store(false, Ordering::SeqCst);
 
         // Configurar callback de conectividade para emitir eventos e drenar fila ao reconectar (Requisito 8.3)
-        let engine_for_net = Arc::clone(self);
+        let emitter = Arc::clone(&self.emitter);
+        let reconnected = Arc::new(tokio::sync::Notify::new());
+        let reconnect_signal = Arc::clone(&reconnected);
         self.network_detector.on_state_change(move |online| {
             if online {
-                engine_for_net.emit_void("network:online");
-                let eng = Arc::clone(&engine_for_net);
-                tokio::spawn(async move {
-                    let _ = eng.poll_remote_changes().await;
-                    let _ = eng.process_queue().await;
-                });
+                emitter.emit_json("network:online", serde_json::Value::Null);
+                reconnect_signal.notify_one();
             } else {
-                engine_for_net.emit_void("network:offline");
+                emitter.emit_json("network:offline", serde_json::Value::Null);
             }
         });
+
+        // Iniciar loop de detecção de conectividade em background (Requisito 8.1)
+        let probe_host = cfg
+            .endpoint_url
+            .as_deref()
+            .unwrap_or("s3.amazonaws.com")
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("s3.amazonaws.com")
+            .to_string();
+        self.network_detector.start(&probe_host);
 
         // Iniciar FileWatcher
         let (fs_tx, mut fs_rx) = mpsc::channel::<LocalFsEvent>(256);
@@ -327,58 +392,75 @@ impl SyncEngine {
         fw.start()?;
         *self.watcher.lock().unwrap() = Some(fw);
 
+        // Recuperar operações interrompidas por crash ou fechamento forçado (Requisito 8.6)
+        let _ = self.queue_manager.recover_interrupted_items();
+
         // Primeira varredura inicial: remota + local (Requisito 1.2, 10.1)
         self.poll_remote_changes().await?;
         self.process_queue().await?;
         self.scan_local_directory().await?;
         self.process_queue().await?;
 
-        // Task de eventos locais
-        let engine_for_fs = Arc::clone(self);
-        tokio::spawn(async move {
-            while let Some(ev) = fs_rx.recv().await {
-                if !engine_for_fs.running.load(Ordering::SeqCst) {
-                    break;
+        let engine = Arc::clone(self);
+        let cancel = CancellationToken::new();
+        let shutdown = cancel.clone();
+        let task = tokio::spawn(async move {
+            let next_poll = || {
+                let seconds = engine.get_config().sync_interval_secs.clamp(1, 60);
+                tokio::time::sleep(Duration::from_secs(seconds))
+            };
+            let poll = next_poll();
+            tokio::pin!(poll);
+            loop {
+                let poll_remote = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    _ = reconnected.notified() => {
+                        let _ = engine.queue_manager.requeue_failed_items();
+                        true
+                    }
+                    _ = &mut poll => true,
+                    event = fs_rx.recv() => {
+                        let Some(event) = event else { break; };
+                        let _ = engine.process_local_event(event).await;
+                        false
+                    }
+                };
+                if poll_remote {
+                    if engine.network_detector.is_online() {
+                        let _ = engine.poll_remote_changes().await;
+                    }
+                    poll.set(next_poll());
                 }
-                let _ = engine_for_fs.process_local_event(ev).await;
-                if engine_for_fs.network_detector.is_online() {
-                    let _ = engine_for_fs.process_queue().await;
-                }
+                let _ = engine.process_queue().await;
             }
         });
-
-        // Task de polling remoto periódico (Requisito 3.4)
-        let engine_for_poll = Arc::clone(self);
-        tokio::spawn(async move {
-            while engine_for_poll.running.load(Ordering::SeqCst) {
-                let interval = engine_for_poll
-                    .get_config()
-                    .sync_interval_secs
-                    .clamp(1, 60);
-                tokio::time::sleep(Duration::from_secs(interval)).await;
-                if !engine_for_poll.running.load(Ordering::SeqCst) {
-                    break;
-                }
-                if engine_for_poll.network_detector.is_online() {
-                    let _ = engine_for_poll.poll_remote_changes().await;
-                    let _ = engine_for_poll.process_queue().await;
-                }
-            }
-        });
+        *worker = Some((cancel, task));
 
         Ok(())
     }
 
-    /// Shutdown gracioso: para watcher e aguarda transferências ativas por até 60s (Requisito 1.5)
+    /// Para o watcher e encerra o ciclo atual antes de permitir um novo início.
     pub async fn stop(&self) -> Result<(), SyncError> {
+        let mut worker = self.worker.lock().await;
+        self.stopping.store(true, Ordering::SeqCst);
         self.running.store(false, Ordering::SeqCst);
+        if let Some((cancel, _)) = worker.as_ref() {
+            cancel.cancel();
+        }
         self.network_detector.stop();
+        self.network_detector.clear_callbacks();
 
         if let Some(mut fw) = self.watcher.lock().unwrap().take() {
             fw.stop();
         }
 
-        let _ = tokio::time::timeout(Duration::from_secs(60), self.drain_active_transfers()).await;
+        if let Some((_, task)) = worker.as_mut() {
+            let _ = task.await;
+        }
+        *worker = None;
+        self.drain_active_transfers().await;
+        self.stopping.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -416,6 +498,25 @@ impl SyncEngine {
         }
         let base = PathBuf::from(&cfg.local_path);
 
+        // Movimentos internos para a pasta de recuperação também disparam eventos do watcher.
+        let paths: Vec<&Path> = match &event {
+            LocalFsEvent::Created(p) | LocalFsEvent::Modified(p) | LocalFsEvent::Deleted(p) => {
+                vec![p]
+            }
+            LocalFsEvent::Renamed { from, to } => vec![from, to],
+        };
+        if paths.iter().any(|path| {
+            !path_within_sync_folder(path, &base) || path.strip_prefix(&base)
+                .map(|relative| {
+                    relative
+                        .components()
+                        .any(|part| part.as_os_str() == deletion_review::TRASH)
+                })
+                .unwrap_or(true)
+        }) {
+            return Ok(());
+        }
+
         match event {
             LocalFsEvent::Created(path) | LocalFsEvent::Modified(path) => {
                 if path.is_dir() || is_excluded(&path, &cfg.exclusion_patterns) {
@@ -428,12 +529,24 @@ impl SyncEngine {
 
                 let s3_key = apply_s3_prefix(local_path_to_s3_key(&path, &base), &cfg.s3_prefix);
 
-                // Se o arquivo local já está registrado com o mesmo MD5 (ex: recém-baixado do S3), ignorar evento
+                if self.has_deletion_review(&s3_key)? {
+                    return Ok(());
+                }
+
+                // Se o arquivo local já está registrado e o hash não mudou desde o último sync,
+                // ignorar o evento (ex: arquivo recém-baixado do S3 que disparou evento de FS).
+                // Usa local_hash em vez de last_sync_etag para ser correto com uploads multipart
+                // e objetos SSE-KMS, onde o ETag remoto nunca coincide com o MD5 local.
                 if let Ok(Some(entry)) = self.db.get_file_entry_by_key(&s3_key) {
-                    if let (Some(ref sync_etag), Ok(local_md5)) =
-                        (&entry.last_sync_etag, compute_md5(&path))
-                    {
-                        if sync_etag.eq_ignore_ascii_case(&local_md5) {
+                    if let Ok(local_md5) = compute_md5(&path) {
+                        let reference = entry
+                            .local_hash
+                            .as_deref()
+                            .or(entry.last_sync_etag.as_deref());
+                        if reference
+                            .map(|h| local_md5.eq_ignore_ascii_case(h))
+                            .unwrap_or(false)
+                        {
                             return Ok(());
                         }
                     }
@@ -452,13 +565,23 @@ impl SyncEngine {
                     return Ok(());
                 }
                 let s3_key = apply_s3_prefix(local_path_to_s3_key(&path, &base), &cfg.s3_prefix);
-                let op = SyncOperation {
-                    operation_type: SyncOperationType::Delete,
-                    s3_key,
-                    local_path: path.to_string_lossy().to_string(),
-                    extra: None,
-                };
-                self.enqueue_and_notify(op)?;
+                if self
+                    .db
+                    .get_file_entry_by_key(&s3_key)
+                    .map_err(|e| SyncError::Queue(e.to_string()))?
+                    .is_some()
+                {
+                    if cfg.sync_direction.eq_ignore_ascii_case("UploadOnly") {
+                        self.enqueue_and_notify(SyncOperation {
+                            operation_type: SyncOperationType::Delete,
+                            s3_key,
+                            local_path: path.to_string_lossy().to_string(),
+                            extra: None,
+                        })?;
+                    } else {
+                        self.poll_remote_changes().await?;
+                    }
+                }
             }
             LocalFsEvent::Renamed { from, to } => {
                 if is_excluded(&to, &cfg.exclusion_patterns) {
@@ -466,6 +589,9 @@ impl SyncEngine {
                 }
                 let from_key = apply_s3_prefix(local_path_to_s3_key(&from, &base), &cfg.s3_prefix);
                 let to_key = apply_s3_prefix(local_path_to_s3_key(&to, &base), &cfg.s3_prefix);
+                if self.has_deletion_review(&from_key)? || self.has_deletion_review(&to_key)? {
+                    return Ok(());
+                }
                 let op = SyncOperation {
                     operation_type: SyncOperationType::Rename,
                     s3_key: from_key,
@@ -480,6 +606,7 @@ impl SyncEngine {
     }
 
     pub async fn poll_remote_changes(&self) -> Result<(), SyncError> {
+        let _guard = self.reconciliation_lock.lock().await;
         if !self.network_detector.is_online() {
             return Ok(());
         }
@@ -487,6 +614,12 @@ impl SyncEngine {
         let cfg = self.get_config();
         let is_upload_only = cfg.sync_direction.eq_ignore_ascii_case("UploadOnly");
         let base = PathBuf::from(&cfg.local_path);
+        fs::read_dir(&base).map_err(|e| SyncError::Io(e.to_string()))?;
+        if !cfg.sync_direction.eq_ignore_ascii_case("Bidirectional") {
+            for review in self.deletion_reviews()? {
+                self.clear_deletion_review(&review.s3_key)?;
+            }
+        }
         let s3_client = self
             .s3_client
             .read()
@@ -503,16 +636,42 @@ impl SyncEngine {
             Err(e) => return Err(SyncError::from(e)),
         };
 
-        let existing_entries = self
+        // Indexar entradas existentes por s3_key para buscas O(1) no loop abaixo.
+        let existing_entries: HashMap<String, FileEntry> = self
             .db
             .list_file_entries()
-            .map_err(|e| SyncError::Queue(e.to_string()))?;
+            .map_err(|e| SyncError::Queue(e.to_string()))?
+            .into_iter()
+            .map(|e| (e.s3_key.clone(), e))
+            .collect();
 
         let mut seen_keys = HashSet::new();
 
         for s3_obj in &remote_objects {
-            let local_path = s3_key_to_local_path(&s3_obj.key, &base);
-            if is_excluded(&local_path, &cfg.exclusion_patterns) {
+            let prefix = cfg.s3_prefix.as_deref().unwrap_or("").trim_matches('/');
+            let relative_key = if prefix.is_empty() {
+                s3_obj.key.as_str()
+            } else {
+                s3_obj
+                    .key
+                    .strip_prefix(&format!("{prefix}/"))
+                    .unwrap_or(&s3_obj.key)
+            };
+            if relative_key
+                .split('/')
+                .any(|part| part == deletion_review::TRASH)
+            {
+                continue;
+            }
+            // Entradas antigas podem ter sido sincronizadas com outro mapeamento de prefixo.
+            // O histórico deve continuar referindo-se ao caminho realmente sincronizado.
+            let local_path = existing_entries
+                .get(&s3_obj.key)
+                .map(|entry| PathBuf::from(&entry.local_path))
+                .unwrap_or_else(|| s3_key_to_local_path(relative_key, &base));
+            if !path_within_sync_folder(&local_path, &base)
+                || is_excluded(&local_path, &cfg.exclusion_patterns)
+            {
                 continue;
             }
             // Ignorar marcadores de pasta do S3 (chaves terminadas em '/') criando apenas o diretório local
@@ -524,7 +683,7 @@ impl SyncEngine {
             }
             seen_keys.insert(s3_obj.key.clone());
 
-            let existing = existing_entries.iter().find(|e| e.s3_key == s3_obj.key);
+            let existing = existing_entries.get(&s3_obj.key);
             match existing {
                 None => {
                     if !is_upload_only {
@@ -543,13 +702,17 @@ impl SyncEngine {
                                         local_path: local_path.to_string_lossy().to_string(),
                                         sync_state: SyncState::Synced,
                                         last_sync_etag: Some(s3_obj.etag.clone()),
+                                        local_hash: Some(local_md5.clone()),
                                         last_sync_time: Some(now),
                                         local_modified_time: Some(now),
                                         size_bytes: size,
                                     };
                                     let _ = self.db.upsert_file_entry(&entry);
-                                    self.status_monitor
-                                        .set_file_status(&s3_obj.key, SyncState::Synced, size);
+                                    self.status_monitor.set_file_status(
+                                        &s3_obj.key,
+                                        SyncState::Synced,
+                                        size,
+                                    );
                                     continue;
                                 }
                             }
@@ -566,6 +729,7 @@ impl SyncEngine {
                                 local_path: local_path.to_string_lossy().to_string(),
                                 sync_state: SyncState::Pending,
                                 last_sync_etag: None,
+                                local_hash: None,
                                 last_sync_time: None,
                                 local_modified_time: Some(local_modified),
                                 size_bytes,
@@ -603,20 +767,62 @@ impl SyncEngine {
                     }
                 }
                 Some(entry) => {
-                    // Atualizar local_modified_time se o arquivo local mudou em disco
+                    let local_exists = local_path
+                        .try_exists()
+                        .map_err(|e| SyncError::Io(e.to_string()))?;
+                    if !local_exists && entry.last_sync_etag.is_some() {
+                        if cfg.sync_direction.eq_ignore_ascii_case("DownloadOnly") {
+                            self.enqueue_and_notify(SyncOperation {
+                                operation_type: SyncOperationType::Download,
+                                s3_key: s3_obj.key.clone(),
+                                local_path: entry.local_path.clone(),
+                                extra: None,
+                            })?;
+                        } else if !is_upload_only {
+                            self.review_deletion(entry, Some(s3_obj))?;
+                        }
+                        continue;
+                    }
+                    if self.has_deletion_review(&s3_obj.key)? {
+                        self.clear_deletion_review(&s3_obj.key)?;
+                    }
+                    // Detectar mudança local usando metadados do SO como proxy barato antes
+                    // de recalcular o hash. Para arquivos grandes, ler mtime e tamanho é uma
+                    // syscall; calcular MD5 lê o arquivo inteiro — evitar no caso estável.
                     let mut updated_entry = entry.clone();
                     if local_path.exists() {
-                        if let Ok(file_md5) = compute_md5(&local_path) {
-                            if Some(file_md5) != entry.last_sync_etag {
-                                updated_entry.local_modified_time = Some(Utc::now());
-                                if let Ok(meta) = fs::metadata(&local_path) {
-                                    updated_entry.size_bytes = meta.len();
+                        if let Ok(meta) = fs::metadata(&local_path) {
+                            let current_size = meta.len();
+                            let current_mtime: Option<DateTime<Utc>> =
+                                meta.modified().ok().map(DateTime::<Utc>::from);
+
+                            // Recalcular hash somente se tamanho ou mtime indicam mudança.
+                            let size_changed = current_size != entry.size_bytes;
+                            let mtime_newer = current_mtime
+                                .zip(entry.last_sync_time)
+                                .map(|(mtime, sync_time)| mtime > sync_time)
+                                .unwrap_or(true); // sem referência → recalcular
+
+                            if size_changed || mtime_newer {
+                                if let Ok(file_md5) = compute_md5(&local_path) {
+                                    let local_ref = entry
+                                        .local_hash
+                                        .as_deref()
+                                        .or(entry.last_sync_etag.as_deref());
+                                    if local_ref
+                                        .map(|h| !file_md5.eq_ignore_ascii_case(h))
+                                        .unwrap_or(false)
+                                    {
+                                        updated_entry.local_modified_time = Some(Utc::now());
+                                        updated_entry.size_bytes = current_size;
+                                    }
                                 }
                             }
                         }
                     }
 
-                    if !is_upload_only && ConflictResolver::detect_conflict(&updated_entry, s3_obj) {
+                    if !is_upload_only && ConflictResolver::detect_conflict(&updated_entry, s3_obj)
+                    {
                         let resolver = ConflictResolver::new(base.clone());
                         match resolver.resolve(&updated_entry, s3_obj, &s3_client).await {
                             Ok(conflict_info) => {
@@ -660,17 +866,39 @@ impl SyncEngine {
 
         // Objetos que existiam no file_registry mas foram removidos do S3 (Requisito 3.3)
         if !is_upload_only {
-            for entry in &existing_entries {
-                if !seen_keys.contains(&entry.s3_key) {
+            for (s3_key, entry) in &existing_entries {
+                if !seen_keys.contains(s3_key) {
                     let local_path = PathBuf::from(&entry.local_path);
                     if is_excluded(&local_path, &cfg.exclusion_patterns) {
                         continue;
                     }
-                    if local_path.exists() {
-                        let _ = fs::remove_file(&local_path);
+                    if local_path
+                        .try_exists()
+                        .map_err(|e| SyncError::Io(e.to_string()))?
+                    {
+                        if cfg.sync_direction.eq_ignore_ascii_case("DownloadOnly") {
+                            // Mesmo em download-only, preservar uma cópia local antes de remover.
+                            let trash_dir = base.join(deletion_review::TRASH).join(
+                                Utc::now()
+                                    .timestamp_nanos_opt()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                            fs::create_dir_all(&trash_dir)
+                                .map_err(|e| SyncError::Io(e.to_string()))?;
+                            let name = local_path
+                                .file_name()
+                                .ok_or_else(|| SyncError::Io("Nome inválido.".into()))?;
+                            fs::rename(&local_path, trash_dir.join(name))
+                                .map_err(|e| SyncError::Io(e.to_string()))?;
+                        } else {
+                            self.review_deletion(entry, None)?;
+                            continue;
+                        }
                     }
-                    let _ = self.db.delete_file_entry(&entry.s3_key);
-                    self.status_monitor.remove_state(&entry.s3_key);
+                    self.clear_deletion_review(s3_key)?;
+                    let _ = self.db.delete_file_entry(s3_key);
+                    self.status_monitor.remove_state(s3_key);
                 }
             }
         }
@@ -696,7 +924,7 @@ impl SyncEngine {
         let synced_in_batch = Arc::new(AtomicUsize::new(0));
 
         loop {
-            if !self.network_detector.is_online() {
+            if self.stopping.load(Ordering::SeqCst) || !self.network_detector.is_online() {
                 break;
             }
 
@@ -755,9 +983,8 @@ impl SyncEngine {
                             Err(e) => {
                                 last_error = e.to_string();
                                 if attempt < engine.retry_policy.max_attempts {
-                                    let delay = engine
-                                        .retry_policy
-                                        .delay_for_attempt(attempt, is_download);
+                                    let delay =
+                                        engine.retry_policy.delay_for_attempt(attempt, is_download);
                                     tokio::time::sleep(delay).await;
                                 }
                             }
@@ -776,9 +1003,7 @@ impl SyncEngine {
                         );
                         synced_counter.fetch_add(1, Ordering::SeqCst);
                     } else {
-                        for _ in 0..engine.retry_policy.max_attempts {
-                            let _ = engine.queue_manager.mark_failed(item.id, &last_error);
-                        }
+                        let _ = engine.queue_manager.mark_failed(item.id, &last_error);
                         engine
                             .status_monitor
                             .set_state(&s3_key, SyncState::Error(last_error.clone()));
@@ -826,6 +1051,14 @@ impl SyncEngine {
         s3_client: &S3Client,
         base: &Path,
     ) -> Result<(), SyncError> {
+        if !path_within_sync_folder(Path::new(&op.local_path), base) {
+            return Err(SyncError::Io("Caminho fora da pasta de sincronização.".into()));
+        }
+        if op.extra.as_deref() != Some("deletion-review") && self.has_deletion_review(&op.s3_key)? {
+            return Err(SyncError::Conflict(
+                "Exclusão aguardando sua decisão.".into(),
+            ));
+        }
         match op.operation_type {
             SyncOperationType::Upload => {
                 let path = PathBuf::from(&op.local_path);
@@ -837,7 +1070,14 @@ impl SyncEngine {
                 if let Ok(Some(mut entry)) = self.db.get_file_entry_by_key(&op.s3_key) {
                     if let Ok(remote_info) = s3_client.head_object(&op.s3_key).await {
                         if let Ok(local_md5) = compute_md5(&path) {
-                            if Some(local_md5) != entry.last_sync_etag {
+                            let local_ref = entry
+                                .local_hash
+                                .as_deref()
+                                .or(entry.last_sync_etag.as_deref());
+                            if local_ref
+                                .map(|h| !local_md5.eq_ignore_ascii_case(h))
+                                .unwrap_or(true)
+                            {
                                 entry.local_modified_time = Some(Utc::now());
                             }
                         }
@@ -857,6 +1097,7 @@ impl SyncEngine {
                     "sync:transfer-progress",
                     &TransferProgressEvent {
                         path: op.s3_key.clone(),
+                        operation: SyncOperationType::Upload,
                         bytes_transferred: 0,
                         total_bytes: file_size,
                         percent: 0,
@@ -864,11 +1105,7 @@ impl SyncEngine {
                 );
 
                 let etag = if S3Client::requires_multipart(file_size) {
-                    let resume = self
-                        .db
-                        .get_multipart_state(&op.s3_key)
-                        .ok()
-                        .flatten();
+                    let resume = self.db.get_multipart_state(&op.s3_key).ok().flatten();
                     let key_for_ev = op.s3_key.clone();
                     s3_client
                         .upload_multipart_with_progress(&op.s3_key, &path, resume, |sent, total| {
@@ -881,6 +1118,7 @@ impl SyncEngine {
                                 "sync:transfer-progress",
                                 &TransferProgressEvent {
                                     path: key_for_ev.clone(),
+                                    operation: SyncOperationType::Upload,
                                     bytes_transferred: sent,
                                     total_bytes: total,
                                     percent: pct,
@@ -894,6 +1132,7 @@ impl SyncEngine {
                         "sync:transfer-progress",
                         &TransferProgressEvent {
                             path: op.s3_key.clone(),
+                            operation: SyncOperationType::Upload,
                             bytes_transferred: file_size,
                             total_bytes: file_size,
                             percent: 100,
@@ -902,12 +1141,14 @@ impl SyncEngine {
                     res
                 };
 
+                let local_hash = compute_md5(&path).ok();
                 let now = Utc::now();
                 let entry = FileEntry {
                     s3_key: op.s3_key.clone(),
                     local_path: op.local_path.clone(),
                     sync_state: SyncState::Synced,
                     last_sync_etag: Some(etag),
+                    local_hash,
                     last_sync_time: Some(now),
                     local_modified_time: Some(now),
                     size_bytes: file_size,
@@ -923,6 +1164,7 @@ impl SyncEngine {
                     "sync:transfer-progress",
                     &TransferProgressEvent {
                         path: op.s3_key.clone(),
+                        operation: SyncOperationType::Download,
                         bytes_transferred: 0,
                         total_bytes: 0,
                         percent: 15,
@@ -934,17 +1176,20 @@ impl SyncEngine {
                     "sync:transfer-progress",
                     &TransferProgressEvent {
                         path: op.s3_key.clone(),
+                        operation: SyncOperationType::Download,
                         bytes_transferred: size_bytes,
                         total_bytes: size_bytes,
                         percent: 100,
                     },
                 );
+                let local_hash = compute_md5(&dest).ok();
                 let now = Utc::now();
                 let entry = FileEntry {
                     s3_key: op.s3_key.clone(),
                     local_path: op.local_path.clone(),
                     sync_state: SyncState::Synced,
                     last_sync_etag: Some(etag),
+                    local_hash,
                     last_sync_time: Some(now),
                     local_modified_time: Some(now),
                     size_bytes,
@@ -964,32 +1209,35 @@ impl SyncEngine {
                     SyncError::Io("Missing destination key for Rename/Move".to_string())
                 })?;
 
-                // Obter ETag da origem para propagar ao registro do destino (cópia preserva o mesmo conteúdo)
-                let src_etag = self
+                // Obter ETag e hash local da origem para propagar ao destino (cópia preserva o mesmo conteúdo)
+                let (src_etag, src_local_hash) = self
                     .db
                     .get_file_entry_by_key(&op.s3_key)
                     .ok()
                     .flatten()
-                    .and_then(|e| e.last_sync_etag);
+                    .map(|e| (e.last_sync_etag, e.local_hash))
+                    .unwrap_or((None, None));
 
                 // Copiar para o novo caminho com fallback para upload (Requisito 2.3, 2.4)
-                let dst_etag: Option<String> =
-                    match s3_client.copy_object(&op.s3_key, dst_key).await {
-                        Ok(_) => src_etag,
-                        Err(_) => {
-                            let path = PathBuf::from(&op.local_path);
-                            if path.exists() {
-                                // Fallback: fazer upload do arquivo local para o destino
-                                Some(s3_client.upload_file(dst_key, &path).await?)
-                            } else {
-                                // Nem cópia nem upload possíveis — abortar sem excluir a origem
-                                return Err(SyncError::Io(format!(
+                let dst_etag: Option<String> = match s3_client
+                    .copy_object(&op.s3_key, dst_key)
+                    .await
+                {
+                    Ok(_) => src_etag,
+                    Err(_) => {
+                        let path = PathBuf::from(&op.local_path);
+                        if path.exists() {
+                            // Fallback: fazer upload do arquivo local para o destino
+                            Some(s3_client.upload_file(dst_key, &path).await?)
+                        } else {
+                            // Nem cópia nem upload possíveis — abortar sem excluir a origem
+                            return Err(SyncError::Io(format!(
                                     "Falha ao renomear '{}': cópia S3 falhou e arquivo local '{}' não existe",
                                     op.s3_key, op.local_path
                                 )));
-                            }
                         }
-                    };
+                    }
+                };
 
                 // Requisito 2.9: excluir a origem somente após destino confirmado
                 if let Err(e) = s3_client.delete_object(&op.s3_key).await {
@@ -1007,11 +1255,16 @@ impl SyncEngine {
                     .metadata()
                     .map(|m| m.len())
                     .unwrap_or(0);
+                // Recomputar hash local do destino; usar hash da origem como fallback
+                let dst_local_hash = compute_md5(&PathBuf::from(&op.local_path))
+                    .ok()
+                    .or(src_local_hash);
                 let new_entry = FileEntry {
                     s3_key: dst_key.to_string(),
                     local_path: op.local_path.clone(),
                     sync_state: SyncState::Synced,
                     last_sync_etag: dst_etag,
+                    local_hash: dst_local_hash,
                     last_sync_time: Some(now),
                     local_modified_time: Some(now),
                     size_bytes,
@@ -1067,7 +1320,7 @@ impl SyncEngine {
             return Ok(());
         }
 
-        let mut stack = vec![base];
+        let mut stack = vec![base.clone()];
         while let Some(dir) = stack.pop() {
             let entries = match fs::read_dir(&dir) {
                 Ok(e) => e,
@@ -1079,8 +1332,13 @@ impl SyncEngine {
                     Err(_) => continue,
                 };
                 let path = entry.path();
+                if !path_within_sync_folder(&path, &base) {
+                    continue;
+                }
                 if path.is_dir() {
-                    if !is_excluded(&path, &cfg.exclusion_patterns) {
+                    if path.file_name().and_then(|n| n.to_str()) != Some(deletion_review::TRASH)
+                        && !is_excluded(&path, &cfg.exclusion_patterns)
+                    {
                         stack.push(path);
                     }
                 } else if path.is_file() {
@@ -1088,9 +1346,7 @@ impl SyncEngine {
                     if name.contains("(conflito-") || name.ends_with(".tmp") {
                         continue;
                     }
-                    let _ = self
-                        .process_local_event(LocalFsEvent::Modified(path))
-                        .await;
+                    let _ = self.process_local_event(LocalFsEvent::Modified(path)).await;
                 }
             }
         }
@@ -1183,7 +1439,9 @@ impl SyncEngine {
     ) -> Result<String, SyncError> {
         let client_opt = self.s3_client.read().unwrap().clone();
         let client = client_opt.ok_or_else(|| {
-            SyncError::Credentials("Cliente S3 não inicializado. Inicie a sincronização primeiro.".to_string())
+            SyncError::Credentials(
+                "Cliente S3 não inicializado. Inicie a sincronização primeiro.".to_string(),
+            )
         })?;
         client
             .generate_presigned_url(s3_key, expires_in_secs)
@@ -1231,7 +1489,8 @@ impl SyncEngine {
             if src != dest {
                 fs::copy(&src, &dest).map_err(|e| SyncError::Io(e.to_string()))?;
             }
-            self.process_local_event(LocalFsEvent::Created(dest)).await?;
+            self.process_local_event(LocalFsEvent::Created(dest))
+                .await?;
             imported += 1;
         }
 
@@ -1249,11 +1508,7 @@ impl SyncEngine {
         let local_path = s3_key_to_local_path(s3_key, &base);
         let local_exists = local_path.exists() && local_path.is_file();
 
-        let db_entry = self
-            .db
-            .get_file_entry_by_key(s3_key)
-            .ok()
-            .flatten();
+        let db_entry = self.db.get_file_entry_by_key(s3_key).ok().flatten();
 
         let size_bytes = if local_exists {
             fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0)
@@ -1262,9 +1517,11 @@ impl SyncEngine {
         };
 
         let local_md5 = if local_exists && size_bytes <= 100 * 1024 * 1024 {
+            // Para arquivos pequenos: computar MD5 atual do disco
             compute_md5(&local_path).ok()
         } else {
-            None
+            // Para arquivos grandes: usar o hash armazenado no registro (computado no último sync)
+            db_entry.as_ref().and_then(|e| e.local_hash.clone())
         };
 
         Ok(ObjectDetailedMetadata {
@@ -1274,12 +1531,14 @@ impl SyncEngine {
             size_bytes,
             etag: db_entry.as_ref().and_then(|e| e.last_sync_etag.clone()),
             local_md5,
-            last_sync_time: db_entry
-                .as_ref()
-                .and_then(|e| e.last_sync_time.map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())),
-            local_modified_time: db_entry
-                .as_ref()
-                .and_then(|e| e.local_modified_time.map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())),
+            last_sync_time: db_entry.as_ref().and_then(|e| {
+                e.last_sync_time
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            }),
+            local_modified_time: db_entry.as_ref().and_then(|e| {
+                e.local_modified_time
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            }),
             storage_class: cfg.storage_class,
             server_side_encryption: cfg.server_side_encryption,
         })
@@ -1323,11 +1582,13 @@ impl SyncEngine {
             .await?;
         let size_bytes = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
         let now = Utc::now();
+        let local_hash = compute_md5(&dest).ok();
         let entry = FileEntry {
             s3_key: s3_key.to_string(),
             local_path: dest.to_string_lossy().to_string(),
             sync_state: SyncState::Synced,
             last_sync_etag: Some(etag),
+            local_hash,
             last_sync_time: Some(now),
             local_modified_time: Some(now),
             size_bytes,
@@ -1376,6 +1637,9 @@ impl SyncEngine {
 
     /// Exclui um objeto localmente e enfileira a remoção remota no S3
     pub async fn delete_file_and_sync(self: &Arc<Self>, s3_key: &str) -> Result<(), SyncError> {
+        // A tela já confirmou esta operação; não classificá-la novamente durante o polling.
+        let _guard = self.reconciliation_lock.lock().await;
+        self.clear_deletion_review(s3_key)?;
         let cfg = self.get_config();
         let base = PathBuf::from(&cfg.local_path);
         let local_path = s3_key_to_local_path(s3_key, &base);
@@ -1404,6 +1668,7 @@ impl SyncEngine {
         old_s3_key: &str,
         new_s3_key: &str,
     ) -> Result<String, SyncError> {
+        let _guard = self.reconciliation_lock.lock().await;
         let normalized_new = new_s3_key
             .trim()
             .replace('\\', "/")
@@ -1462,6 +1727,10 @@ impl SyncEngine {
         self: &Arc<Self>,
         s3_keys: &[String],
     ) -> Result<usize, SyncError> {
+        let _guard = self.reconciliation_lock.lock().await;
+        for key in s3_keys {
+            self.clear_deletion_review(key)?;
+        }
         let cfg = self.get_config();
         let base = PathBuf::from(&cfg.local_path);
         let mut count = 0usize;
@@ -1655,6 +1924,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_local_event_ignores_excluded_file() {
+        let root = tempfile::tempdir().unwrap();
         let db = Database::new_in_memory().unwrap();
         let qm = Arc::new(QueueManager::new(&db));
         let sm = Arc::new(StatusMonitor::default());
@@ -1662,19 +1932,19 @@ mod tests {
         let emitter = Arc::new(RecordingEmitter::default());
 
         let mut cfg = AppConfig::default();
-        cfg.local_path = "/drive".to_string();
+        cfg.local_path = root.path().to_str().unwrap().to_owned();
         cfg.exclusion_patterns = vec!["*.tmp".to_string(), ".DS_Store".to_string()];
 
         let engine = SyncEngine::new(cfg, None, db, Arc::clone(&qm), sm, nd, emitter);
 
         engine
-            .process_local_event(LocalFsEvent::Created(PathBuf::from("/drive/cache.tmp")))
+            .process_local_event(LocalFsEvent::Created(root.path().join("cache.tmp")))
             .await
             .unwrap();
         assert_eq!(qm.count_pending().unwrap(), 0);
 
         engine
-            .process_local_event(LocalFsEvent::Created(PathBuf::from("/drive/valid.txt")))
+            .process_local_event(LocalFsEvent::Created(root.path().join("valid.txt")))
             .await
             .unwrap();
         assert_eq!(qm.count_pending().unwrap(), 1);

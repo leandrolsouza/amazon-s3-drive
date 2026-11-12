@@ -1,14 +1,17 @@
+import { UploadDialog } from "../components/UploadDialog";
+import { Icon } from "../components/Icon";
 import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncStore } from "../store";
+import { syncPresentation } from "../syncPresentation";
+import { runSyncCommand } from "../syncCommands";
+import { DeleteConfirmation } from "../components/DeleteConfirmation";
 import {
   FileStatus,
-  GlobalSyncState,
   ObjectDetailedMetadata,
   QueueStats,
   S3ObjectVersion,
-  StorageAnalytics,
   SyncState,
 } from "../types";
 
@@ -110,22 +113,6 @@ function renderStateVectorIcon(state: SyncState) {
   }
 }
 
-function renderGlobalBadge(globalState: GlobalSyncState): {
-  text: string;
-  badgeClass: string;
-} {
-  switch (globalState) {
-    case "UpToDate":
-      return { text: "UpToDate", badgeClass: "badge-uptodate" };
-    case "Syncing":
-      return { text: "Syncing", badgeClass: "badge-syncing" };
-    case "Error":
-      return { text: "Error", badgeClass: "badge-error" };
-    case "Offline":
-      return { text: "Offline", badgeClass: "badge-offline" };
-  }
-}
-
 export function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -149,17 +136,23 @@ function splitPath(fullPath: string): { dir: string; base: string } {
 export const StatusView: React.FC = () => {
   const fileStatuses = useSyncStore((s) => s.fileStatuses);
   const transferProgress = useSyncStore((s) => s.transferProgress);
-  const globalState = useSyncStore((s) => s.globalState);
+  const badge = syncPresentation(useSyncStore());
+  const syncAction = useSyncStore((s) => s.syncAction);
+  const syncRunning = useSyncStore((s) => s.syncRunning);
+  const [pendingDelete, setPendingDelete] = useState<string[] | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(false);
   const queueStats = useSyncStore((s) => s.queueStats);
   const setFileStatuses = useSyncStore((s) => s.setFileStatuses);
   const setQueueStats = useSyncStore((s) => s.setQueueStats);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [stateFilter, setStateFilter] = useState<
-    "ALL" | "Synced" | "Syncing" | "Pending" | "Error"
+    "ALL" | "Synced" | "Active" | "Error"
   >("ALL");
-  const [viewMode, setViewMode] = useState<"flat" | "tree">("flat");
+  const [viewMode, setViewMode] = useState<"flat" | "tree">("tree");
   const [currentFolder, setCurrentFolder] = useState<string>("");
+  const [uploadPaths, setUploadPaths] = useState<string[] | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
   const [selectedMetadata, setSelectedMetadata] =
@@ -176,9 +169,6 @@ export const StatusView: React.FC = () => {
   const [showNewFolderInput, setShowNewFolderInput] = useState<boolean>(false);
   const [newFolderName, setNewFolderName] = useState<string>("");
   const [selectedBatchKeys, setSelectedBatchKeys] = useState<string[]>([]);
-  const [showAnalyticsBar, setShowAnalyticsBar] = useState<boolean>(false);
-  const [storageAnalytics, setStorageAnalytics] =
-    useState<StorageAnalytics | null>(null);
   const [renameTargetKey, setRenameTargetKey] = useState<string>("");
   const [actionFeedback, setActionFeedback] = useState<{
     type: "ok" | "error";
@@ -186,9 +176,16 @@ export const StatusView: React.FC = () => {
   } | null>(null);
 
   useEffect(() => {
+    if (actionFeedback?.type !== "ok") return;
+    const timer = setTimeout(() => setActionFeedback(null), 5500);
+    return () => clearTimeout(timer);
+  }, [actionFeedback]);
+
+  useEffect(() => {
+    let disposed = false;
     invoke<FileStatus[]>("get_sync_status")
       .then((statuses) => {
-        if (Array.isArray(statuses) && statuses.length > 0) {
+        if (!disposed && Array.isArray(statuses) && statuses.length > 0) {
           setFileStatuses(statuses);
         }
       })
@@ -196,12 +193,13 @@ export const StatusView: React.FC = () => {
 
     invoke<QueueStats>("get_queue_stats")
       .then((stats) => {
-        if (stats && typeof stats.pending_count === "number") {
+        if (!disposed && stats && typeof stats.pending_count === "number") {
           setQueueStats(stats);
         }
       })
       .catch(() => {});
-  }, [setFileStatuses, setQueueStats]);
+    return () => { disposed = true; };
+  }, [setFileStatuses, setQueueStats, syncRunning]);
 
   useEffect(() => {
     let unlistenDrop: (() => void) | undefined;
@@ -212,19 +210,7 @@ export const StatusView: React.FC = () => {
       setIsDragOver(false);
       const droppedPaths = ev.payload?.paths;
       if (Array.isArray(droppedPaths) && droppedPaths.length > 0) {
-        invoke<number>("import_files_to_drive", {
-          paths: droppedPaths,
-          targetSubfolder: currentFolder || null,
-        })
-          .then((count) => {
-            setActionFeedback({
-              type: "ok",
-              text: `${count} arquivo(s) importado(s) via Drag & Drop para sincronização.`,
-            });
-          })
-          .catch((err) => {
-            setActionFeedback({ type: "error", text: String(err) });
-          });
+        setUploadPaths((open) => open ?? droppedPaths);
       }
     })
       .then((fn) => {
@@ -279,19 +265,6 @@ export const StatusView: React.FC = () => {
       .catch(() => {});
   }, [selectedFileKey]);
 
-  useEffect(() => {
-    if (!showAnalyticsBar) return;
-    invoke<StorageAnalytics>("get_storage_analytics")
-      .then((stats) => {
-        if (stats && typeof stats.total_files === "number") {
-          setStorageAnalytics(stats);
-        }
-      })
-      .catch(() => {});
-  }, [showAnalyticsBar, fileStatuses]);
-
-  const badge = renderGlobalBadge(globalState);
-
   const counts = useMemo(() => {
     const total = fileStatuses.length;
     const synced = fileStatuses.filter((f) => f.state.type === "Synced").length;
@@ -311,7 +284,9 @@ export const StatusView: React.FC = () => {
         !searchQuery.trim() ||
         file.path.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesFilter =
-        stateFilter === "ALL" || file.state.type === stateFilter;
+        stateFilter === "ALL" || (stateFilter === "Active"
+          ? file.state.type === "Syncing" || file.state.type === "Pending"
+          : file.state.type === stateFilter);
       if (!matchesSearch || !matchesFilter) return false;
       if (viewMode === "tree" && currentFolder) {
         return file.path.startsWith(currentFolder);
@@ -391,17 +366,19 @@ export const StatusView: React.FC = () => {
 
   const handleSyncNow = async () => {
     try {
-      await invoke("start_sync");
+      await runSyncCommand("start_sync");
+      setActionFeedback({ type: "ok", text: "Sincronização iniciada." });
     } catch {
-      // Handled via event/banner
+      setActionFeedback({ type: "error", text: "Não foi possível iniciar a sincronização. Verifique a configuração e as credenciais e tente novamente em Iniciar." });
     }
   };
 
   const handleStopSync = async () => {
     try {
-      await invoke("stop_sync");
+      await runSyncCommand("stop_sync");
+      setActionFeedback({ type: "ok", text: "Sincronização parada." });
     } catch {
-      // Ignore
+      setActionFeedback({ type: "error", text: "Não foi possível parar a sincronização. Tente novamente em Parar." });
     }
   };
 
@@ -463,23 +440,6 @@ export const StatusView: React.FC = () => {
     }
   };
 
-  const handleUploadFilesDialog = async () => {
-    try {
-      const selectedPaths = await invoke<string[]>("open_files_dialog");
-      if (!selectedPaths || selectedPaths.length === 0) return;
-      const count = await invoke<number>("import_files_to_drive", {
-        paths: selectedPaths,
-        targetSubfolder: currentFolder || null,
-      });
-      setActionFeedback({
-        type: "ok",
-        text: `${count} arquivo(s) importado(s) e enfileirado(s) para upload.`,
-      });
-    } catch (err) {
-      setActionFeedback({ type: "error", text: String(err) });
-    }
-  };
-
   const handleGenerateCustomPresigned = async (
     s3Key: string,
     expiresInSecs: number
@@ -532,21 +492,6 @@ export const StatusView: React.FC = () => {
     }
   };
 
-  const handleDeleteObject = async (s3Key: string) => {
-    try {
-      await invoke("delete_object_sync", { s3Key });
-      setFileStatuses(fileStatuses.filter((f) => f.path !== s3Key));
-      if (selectedFileKey === s3Key) {
-        setSelectedFileKey(null);
-      }
-      setActionFeedback({
-        type: "ok",
-        text: `Objeto removido localmente e enfileirado para exclusão no S3: ${s3Key}`,
-      });
-    } catch (err) {
-      setActionFeedback({ type: "error", text: String(err) });
-    }
-  };
 
   const handleRestoreVersion = async (s3Key: string, versionId: string) => {
     try {
@@ -621,24 +566,27 @@ export const StatusView: React.FC = () => {
     }
   };
 
-  const handleBatchDelete = async () => {
-    if (selectedBatchKeys.length === 0) return;
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    setDeleteError(false);
     try {
-      const count = await invoke<number>("batch_delete_objects", {
-        s3Keys: selectedBatchKeys,
-      });
-      const delSet = new Set(selectedBatchKeys);
-      setFileStatuses(fileStatuses.filter((f) => !delSet.has(f.path)));
-      if (selectedFileKey && delSet.has(selectedFileKey)) {
-        setSelectedFileKey(null);
+      if (pendingDelete.length === 1) {
+        await invoke("delete_object_sync", { s3Key: pendingDelete[0] });
+      } else {
+        await invoke<number>("batch_delete_objects", { s3Keys: pendingDelete });
       }
-      setSelectedBatchKeys([]);
-      setActionFeedback({
-        type: "ok",
-        text: `${count} objeto(s) excluído(s) localmente e enfileirado(s) para remoção no S3.`,
-      });
-    } catch (err) {
-      setActionFeedback({ type: "error", text: String(err) });
+      const deleted = new Set(pendingDelete);
+      const store = useSyncStore.getState();
+      setFileStatuses(store.fileStatuses.filter((f) => !deleted.has(f.path)));
+      if (selectedFileKey && deleted.has(selectedFileKey)) setSelectedFileKey(null);
+      setSelectedBatchKeys((keys) => keys.filter((key) => !deleted.has(key)));
+      setActionFeedback({ type: "ok", text: `${pendingDelete.length} arquivo(s) excluído(s) localmente e enfileirado(s) para remoção no S3.` });
+      setPendingDelete(null);
+    } catch {
+      setDeleteError(true);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -668,6 +616,18 @@ export const StatusView: React.FC = () => {
 
   return (
     <div className="pane-container">
+      {uploadPaths && (
+        <UploadDialog
+          currentFolder={currentFolder}
+          initialPaths={uploadPaths}
+          onCancel={() => setUploadPaths(null)}
+          onImported={(count) => {
+            setUploadPaths(null);
+            setActionFeedback({ type: "ok", text: count + " arquivo(s) importado(s) para sincronização." });
+          }}
+        />
+      )}
+      {pendingDelete && <DeleteConfirmation keysToDelete={pendingDelete} busy={deleting} failed={deleteError} onCancel={() => setPendingDelete(null)} onConfirm={handleConfirmDelete} />}
       {/* Top Command Bar (Estilo Linear / Panic Transmit) */}
       <header className="command-bar">
         <div className="command-bar-left">
@@ -708,7 +668,7 @@ export const StatusView: React.FC = () => {
                 { id: "ALL", label: `Todos (${counts.total})` },
                 { id: "Synced", label: `OK (${counts.synced})` },
                 {
-                  id: "Syncing",
+                  id: "Active",
                   label: `Ativos (${counts.syncing + counts.pending})`,
                 },
                 { id: "Error", label: `Erros (${counts.errors})` },
@@ -730,22 +690,26 @@ export const StatusView: React.FC = () => {
           <div className="segmented-filter">
             <button
               type="button"
-              className={`seg-btn ${viewMode === "flat" ? "seg-active" : ""}`}
+              className={`seg-btn toolbar-icon ${viewMode === "flat" ? "seg-active" : ""}`}
+              aria-pressed={viewMode === "flat"}
+              aria-label="Lista"
               onClick={() => {
                 setViewMode("flat");
                 setCurrentFolder("");
               }}
               title="Exibir lista plana de chaves S3"
             >
-              Lista
+              <Icon name="list" />
             </button>
             <button
               type="button"
-              className={`seg-btn ${viewMode === "tree" ? "seg-active" : ""}`}
+              className={`seg-btn toolbar-icon ${viewMode === "tree" ? "seg-active" : ""}`}
+              aria-pressed={viewMode === "tree"}
+              aria-label="Pastas"
               onClick={() => setViewMode("tree")}
               title="Navegar por hierarquia de pastas"
             >
-              Pastas
+              <Icon name="folder" />
             </button>
           </div>
 
@@ -754,60 +718,56 @@ export const StatusView: React.FC = () => {
           {counts.errors > 0 && (
             <button
               type="button"
-              className="btn-compact row-act-retry"
+              className="btn-compact toolbar-icon row-act-retry"
+              aria-label={`Tentar novamente ${counts.errors} arquivo(s) com erro`}
               onClick={handleRetryAllErrors}
               title="Reenfileirar todos os arquivos com erro"
             >
-              Retry Erros ({counts.errors})
+              <Icon name="retry" />
             </button>
           )}
 
           <button
             type="button"
-            className={`btn-compact ${
-              showAnalyticsBar ? "row-act-active" : ""
-            }`}
-            onClick={() => setShowAnalyticsBar((prev) => !prev)}
-            title="Exibir métricas de armazenamento e estimativa de custo S3"
-          >
-            Métricas
-          </button>
-
-          <button
-            type="button"
-            className={`btn-compact ${
+            className={`btn-compact toolbar-icon ${
               showNewFolderInput ? "row-act-active" : ""
             }`}
+            aria-expanded={showNewFolderInput}
             onClick={() => setShowNewFolderInput((prev) => !prev)}
             title="Criar nova subpasta na localização atual"
           >
-            Nova Pasta
+            <Icon name="folderPlus" /><span className="sr-only">Nova Pasta</span>
           </button>
 
           <button
             type="button"
-            className="btn-compact"
-            onClick={handleUploadFilesDialog}
+            className="btn-compact toolbar-icon"
+            aria-label="Enviar arquivos"
+            onClick={() => setUploadPaths([])}
             title="Importar e enviar arquivos para a pasta atual"
           >
-            Enviar Arquivo(s)
+            <Icon name="upload" />
           </button>
 
           <button
             type="button"
-            className="btn-compact"
+            className="btn-compact toolbar-icon"
+            aria-label="Iniciar"
             onClick={handleSyncNow}
+            disabled={syncAction !== null}
             title="Forçar sincronização imediata"
           >
-            Sync
+            <Icon name={syncAction === "starting" ? "retry" : "play"} />
           </button>
           <button
             type="button"
-            className="btn-compact"
+            className="btn-compact toolbar-icon"
+            aria-label="Parar"
             onClick={handleStopSync}
+            disabled={syncAction !== null}
             title="Pausar motor de sincronização"
           >
-            Pausar
+            <Icon name={syncAction === "stopping" ? "retry" : "stop"} />
           </button>
         </div>
       </header>
@@ -846,48 +806,6 @@ export const StatusView: React.FC = () => {
         </div>
       )}
 
-      {showAnalyticsBar && storageAnalytics && (
-        <div className="analytics-strip mono" aria-label="Métricas de Armazenamento S3">
-          <div className="analytics-metric">
-            <span className="analytics-label">VOLUME TOTAL</span>
-            <span className="analytics-val">
-              {formatBytes(storageAnalytics.total_bytes)}
-            </span>
-          </div>
-          <div className="analytics-metric">
-            <span className="analytics-label">OBJETOS</span>
-            <span className="analytics-val">
-              {storageAnalytics.total_files} ({storageAnalytics.synced_files} OK)
-            </span>
-          </div>
-          <div className="analytics-metric">
-            <span className="analytics-label">STORAGE CLASS</span>
-            <span className="analytics-val">
-              {storageAnalytics.storage_class}
-            </span>
-          </div>
-          <div className="analytics-metric">
-            <span className="analytics-label">CUSTO S3 EST.</span>
-            <span className="analytics-val analytics-accent">
-              US$ {storageAnalytics.estimated_monthly_usd.toFixed(4)} / mês
-            </span>
-          </div>
-          {storageAnalytics.top_extensions.length > 0 && (
-            <div className="analytics-metric analytics-exts">
-              <span className="analytics-label">TOP EXTENSÕES</span>
-              <span className="analytics-val">
-                {storageAnalytics.top_extensions
-                  .map(
-                    (ext) =>
-                      `${ext.extension}: ${formatBytes(ext.bytes)} (${ext.count})`
-                  )
-                  .join(" · ")}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-
       {selectedBatchKeys.length > 0 && (
         <div className="batch-action-bar" role="region" aria-label="Ações em lote">
           <span className="mono batch-count">
@@ -913,7 +831,7 @@ export const StatusView: React.FC = () => {
             <button
               type="button"
               className="btn-compact btn-danger-compact"
-              onClick={handleBatchDelete}
+              onClick={() => { setDeleteError(false); setPendingDelete([...selectedBatchKeys]); }}
               title="Excluir selecionados localmente e no bucket S3"
             >
               Excluir Lote ({selectedBatchKeys.length})
@@ -938,8 +856,8 @@ export const StatusView: React.FC = () => {
 
       {actionFeedback && (
         <div
-          role="status"
-          className={`banner ${
+          role={actionFeedback.type === "error" ? "alert" : "status"}
+          className={`banner action-toast ${
             actionFeedback.type === "ok" ? "banner-ok" : "banner-error"
           }`}
         >
@@ -982,25 +900,31 @@ export const StatusView: React.FC = () => {
 
       {isDragOver && (
         <div className="dropzone-banner mono">
-          SOLTE OS ARQUIVOS AQUI PARA IMPORTAR E ENVIAR AO S3 (
-          {currentFolder || "s3://root"})
+          Solte os arquivos aqui para revisar o envio
         </div>
       )}
 
       {/* Tabela Densa de Arquivos + Painel Inspector Lateral */}
       {fileStatuses.length === 0 ? (
         <div className="empty-table-view">
-          <p className="empty-status">Nenhum arquivo rastreado no momento.</p>
+          <p className="empty-status">{syncAction === "starting" ? "Conectando e verificando arquivos…" : "Nenhum arquivo rastreado no momento."}</p>
           <span className="empty-subtext">
-            Inicie o motor de sincronização, clique em &ldquo;Enviar
-            Arquivo(s)&rdquo; ou arraste arquivos para cá.
+            {syncAction === "starting" ? "Aguarde a inicialização da sincronização." : syncRunning ? "Não há arquivos para exibir. Envie arquivos ou adicione-os à pasta local." : "Inicie a sincronização para carregar os arquivos da pasta local e do S3."}
           </span>
         </div>
       ) : (
         <div className="status-split-body">
           <div className="table-viewport">
             <div className="table-head">
-              <span className="col-st">ST</span>
+              <button
+                type="button"
+                className="state-sort sortable-col"
+                onClick={() => handleSort("state")}
+                title="Ordenar por estado"
+                aria-label="Ordenar por estado"
+              >
+                ST {sortField === "state" ? (sortAsc ? "▲" : "▼") : ""}
+              </button>
               <span
                 className="col-key sortable-col"
                 onClick={() => handleSort("path")}
@@ -1032,13 +956,6 @@ export const StatusView: React.FC = () => {
                 MODIFICADO (UTC){" "}
                 {sortField === "time" ? (sortAsc ? "▲" : "▼") : ""}
               </span>
-              <span
-                className="col-status sortable-col"
-                onClick={() => handleSort("state")}
-                title="Ordenar por Estado"
-              >
-                ESTADO {sortField === "state" ? (sortAsc ? "▲" : "▼") : ""}
-              </span>
               <span className="col-actions">AÇÕES</span>
             </div>
 
@@ -1064,14 +981,12 @@ export const StatusView: React.FC = () => {
                     </span>
                     <span className="col-key mono">
                       <span className="folder-name">{folder.name}/</span>
+                      <span className="folder-count"> ({folder.count} {folder.count === 1 ? "item" : "itens"})</span>
                     </span>
-                    <span className="col-size mono">
+                    <span className="col-size">
                       {formatBytes(folder.totalBytes)}
                     </span>
-                    <span className="col-time mono">—</span>
-                    <span className="col-status mono">
-                      {folder.count} {folder.count === 1 ? "item" : "itens"}
-                    </span>
+                    <span className="col-time">—</span>
                     <span className="col-actions">
                       <button
                         type="button"
@@ -1080,8 +995,9 @@ export const StatusView: React.FC = () => {
                           e.stopPropagation();
                           setCurrentFolder(folder.prefix);
                         }}
+                        title="Abrir pasta"
                       >
-                        Abrir Pasta
+                        <Icon name="chevronRight" /><span className="sr-only">Abrir Pasta</span>
                       </button>
                     </span>
                   </li>
@@ -1091,7 +1007,8 @@ export const StatusView: React.FC = () => {
                 (file) => {
                   const meta = renderStateMeta(file.state);
                   const { dir, base } = splitPath(file.path);
-                  const prog = transferProgress[file.path];
+                  const prog = file.state.type === "Syncing" ? transferProgress[file.path] : undefined;
+                  const stateLabel = prog ? `${meta.label} (${prog.percent}%)` : meta.label;
                   const isSelected = selectedFileKey === file.path;
 
                   return (
@@ -1108,10 +1025,20 @@ export const StatusView: React.FC = () => {
                       <span
                         className={`col-st state-icon-cell ${meta.className}`}
                         data-testid={`icon-${file.state.type}`}
-                        aria-label={meta.label}
+                        role="img"
+                        aria-label={stateLabel}
+                        title={stateLabel}
                       >
                         {renderStateVectorIcon(file.state)}
                         <span className="sr-only">{meta.srIcon}</span>
+                        {prog && (
+                          <span className="inline-progress-track">
+                            <span
+                              className="inline-progress-fill"
+                              style={{ width: `${prog.percent}%` }}
+                            />
+                          </span>
+                        )}
                       </span>
 
                       <span className="col-key mono" title={file.path}>
@@ -1139,32 +1066,16 @@ export const StatusView: React.FC = () => {
                         <span className="key-name">{base}</span>
                       </span>
 
-                      <span className="col-size mono">
+                      <span className="col-size">
                         {file.size_bytes > 0
                           ? formatBytes(file.size_bytes)
                           : "—"}
                       </span>
 
-                      <span className="col-time mono">
+                      <span className="col-time">
                         {file.last_modified
                           ? file.last_modified.replace("T", " ").slice(0, 19)
                           : "—"}
-                      </span>
-
-                      <span className="col-status" title={meta.label}>
-                        <span className={`status-code mono ${meta.className}`}>
-                          {file.state.type === "Syncing" && prog
-                            ? `${meta.label} (${prog.percent}%)`
-                            : meta.label}
-                        </span>
-                        {file.state.type === "Syncing" && prog && (
-                          <span className="inline-progress-track">
-                            <span
-                              className="inline-progress-fill"
-                              style={{ width: `${prog.percent}%` }}
-                            />
-                          </span>
-                        )}
                       </span>
 
                       <span
@@ -1178,7 +1089,7 @@ export const StatusView: React.FC = () => {
                             onClick={() => handleRetryFile(file.path)}
                             title="Tentar sincronizar novamente"
                           >
-                            Retry
+                            <Icon name="retry" /><span className="sr-only">Retry</span>
                           </button>
                         )}
                         <button
@@ -1187,7 +1098,7 @@ export const StatusView: React.FC = () => {
                           onClick={() => handleOpenFile(file.path)}
                           title="Abrir arquivo no aplicativo padrão"
                         >
-                          Abrir
+                          <Icon name="open" /><span className="sr-only">Abrir</span>
                         </button>
                         <button
                           type="button"
@@ -1195,7 +1106,7 @@ export const StatusView: React.FC = () => {
                           onClick={() => handleRevealFile(file.path)}
                           title="Revelar no Explorer / Finder"
                         >
-                          Pasta
+                          <Icon name="folder" /><span className="sr-only">Pasta</span>
                         </button>
                         <button
                           type="button"
@@ -1203,7 +1114,7 @@ export const StatusView: React.FC = () => {
                           onClick={() => handleCopyPresignedUrl(file.path)}
                           title="Copiar link temporário S3 (Presigned URL 1h)"
                         >
-                          Link
+                          <Icon name="link" /><span className="sr-only">Link</span>
                         </button>
                         <button
                           type="button"
@@ -1215,7 +1126,7 @@ export const StatusView: React.FC = () => {
                           }
                           title="Inspecionar metadados técnicos do objeto"
                         >
-                          Info
+                          <Icon name="info" /><span className="sr-only">Info</span>
                         </button>
                       </span>
                     </li>
@@ -1443,7 +1354,7 @@ export const StatusView: React.FC = () => {
                   <button
                     type="button"
                     className="btn-compact btn-danger-compact inspector-full-btn"
-                    onClick={() => handleDeleteObject(selectedFileKey)}
+                    onClick={() => { setDeleteError(false); setPendingDelete([selectedFileKey]); }}
                     title="Excluir arquivo local e enfileirar Delete no bucket S3"
                   >
                     Excluir Objeto (Local + S3)
