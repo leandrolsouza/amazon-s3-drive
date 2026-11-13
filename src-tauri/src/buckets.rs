@@ -1,3 +1,4 @@
+use crate::language::tr;
 use super::*;
 use crate::models::{ConflictEvent, DeletionReview};
 use crate::sync_engine::EventEmitter;
@@ -124,7 +125,7 @@ impl BucketCatalog {
         self.profiles()?
             .into_iter()
             .find(|profile| profile.id == id)
-            .ok_or_else(|| "Bucket de sincronização não encontrado.".into())
+            .ok_or_else(|| tr("Sync bucket not found.", "Bucket de sincronização não encontrado.").into())
     }
 
     fn insert(&self, config: &AppConfig) -> Result<i64, String> {
@@ -185,7 +186,7 @@ impl BucketCatalog {
         id: Option<i64>,
     ) -> Result<(), String> {
         if paths_overlap(Path::new(&config.local_path), &self.app_dir)? {
-            return Err("Escolha uma pasta fora do diretório de dados do aplicativo.".into());
+            return Err(tr("Choose a folder outside the app data directory.", "Escolha uma pasta fora do diretório de dados do aplicativo.").into());
         }
         check_disjoint(config, primary)?;
         for profile in self
@@ -282,12 +283,12 @@ fn resolved_path(path: &Path) -> Result<PathBuf, String> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // Resolve aliases in existing ancestors even if the selected folder is new.
             if std::fs::symlink_metadata(path).is_ok() {
-                return Err("A pasta de sincronização aponta para um local indisponível.".into());
+                return Err(tr("The sync folder points to an unavailable location.", "A pasta de sincronização aponta para um local indisponível.").into());
             }
             let parent = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
-                .ok_or_else(|| "A pasta de sincronização está indisponível.".to_string())?;
+                .ok_or_else(|| tr("The sync folder is unavailable.", "A pasta de sincronização está indisponível.").to_string())?;
             let mut resolved = resolved_path(parent)?;
             match path.components().next_back() {
                 Some(std::path::Component::ParentDir) => {
@@ -298,8 +299,8 @@ fn resolved_path(path: &Path) -> Result<PathBuf, String> {
             }
             Ok(resolved)
         }
-        Err(err) => Err(format!(
-            "Não foi possível verificar a pasta de sincronização. {err}"
+        Err(err) => Err(crate::language::localized_format!(
+            "Could not check the sync folder. {err}", "Não foi possível verificar a pasta de sincronização. {err}"
         )),
     }
 }
@@ -317,12 +318,12 @@ fn paths_overlap(first: &Path, second: &Path) -> Result<bool, String> {
 
 fn check_disjoint(config: &AppConfig, other: &AppConfig) -> Result<(), String> {
     if config.bucket_name.trim() == other.bucket_name.trim() {
-        return Err("Esse bucket já está configurado para sincronização.".into());
+        return Err(tr("This bucket is already configured for sync.", "Esse bucket já está configurado para sincronização.").into());
     }
     if !other.local_path.trim().is_empty()
         && paths_overlap(Path::new(&config.local_path), Path::new(&other.local_path))?
     {
-        return Err("Escolha uma pasta local que não coincida com outra pasta sincronizada nem esteja dentro dela.".into());
+        return Err(tr("Choose a local folder that does not overlap another synced folder.", "Escolha uma pasta local que não coincida com outra pasta sincronizada nem esteja dentro dela.").into());
     }
     Ok(())
 }
@@ -395,7 +396,7 @@ pub async fn create_s3_bucket(
         .is_some_and(|url| !url.trim().is_empty())
     {
         return Err(
-            "A criação de buckets nesta tela está disponível para o endpoint padrão da AWS.".into(),
+            tr("Bucket creation on this screen requires the default AWS endpoint.", "A criação de buckets nesta tela está disponível para o endpoint padrão da AWS.").into(),
         );
     }
     config.bucket_name = bucket_name.trim().into();
@@ -432,7 +433,7 @@ pub async fn add_sync_bucket(
     validate(&config)?;
     let local_path = Path::new(&config.local_path);
     if !local_path.is_absolute() {
-        return Err("Selecione o caminho completo da pasta local.".into());
+        return Err(tr("Select the full local folder path.", "Selecione o caminho completo da pasta local.").into());
     }
     {
         let _configuration = state.buckets.lock_configuration();
@@ -449,7 +450,7 @@ pub async fn add_sync_bucket(
         || primary.use_iam_role != current.use_iam_role
         || primary.force_path_style != current.force_path_style
     {
-        return Err("As configurações da conexão mudaram. Tente adicionar novamente.".into());
+        return Err(tr("The connection settings changed. Try adding the bucket again.", "As configurações da conexão mudaram. Tente adicionar novamente.").into());
     }
     state.buckets.check_additional(&config, &current, None)?;
     std::fs::create_dir_all(local_path).map_err(|err| err.to_string())?;
@@ -458,7 +459,7 @@ pub async fn add_sync_bucket(
         .map_err(|err| err.to_string())?
         .into_os_string()
         .into_string()
-        .map_err(|_| "Caminho local inválido.".to_string())?;
+        .map_err(|_| tr("Invalid local path.", "Caminho local inválido.").to_string())?;
     state.buckets.check_additional(&config, &current, None)?;
     state.buckets.insert(&config)
 }
@@ -509,7 +510,7 @@ pub async fn resolve_bucket_deletion(
     let runtime = state.buckets.runtime(&state.buckets.profile(id)?)?;
     let _lifecycle = runtime.lifecycle.lock().await;
     if !runtime.engine.is_running() {
-        return Err("Inicie a sincronização desse bucket para revisar a exclusão.".into());
+        return Err(tr("Start syncing this bucket to review the deletion.", "Inicie a sincronização desse bucket para revisar a exclusão.").into());
     }
     runtime
         .engine
@@ -543,7 +544,7 @@ pub async fn resolve_bucket_conflict(
     let mut conflicts = runtime.events.conflicts.lock().unwrap();
     let conflict = conflicts
         .get(&path)
-        .ok_or_else(|| "Conflito não encontrado.".to_string())?;
+        .ok_or_else(|| tr("Conflict not found.", "Conflito não encontrado.").to_string())?;
     runtime
         .engine
         .resolve_conflict_action(

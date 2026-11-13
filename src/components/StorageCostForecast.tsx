@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-
-const usd = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "USD",
-  maximumFractionDigits: 4,
-});
+import { t, locale } from "../i18n";
 
 function nonNegative(value: string) {
   const number = Number(value);
@@ -38,6 +33,11 @@ interface Props {
 }
 
 export function StorageCostForecast({ storageUsd, storageBytes = 0, region, customEndpoint }: Props) {
+  const usd = new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 4,
+  });
   const [downloads, setDownloads] = useState("0");
   const [allowance, setAllowance] = useState("0");
   const [manualRate, setManualRate] = useState<string | null>(null);
@@ -68,44 +68,44 @@ export function StorageCostForecast({ storageUsd, storageBytes = 0, region, cust
 
   return (
     <section className="analytics-breakdown cost-forecast" aria-labelledby="cost-forecast-title">
-      <h3 id="cost-forecast-title">Previsão mensal de custos</h3>
+      <h3 id="cost-forecast-title">{t("Monthly cost forecast")}</h3>
       <div className="cost-forecast-inputs">
         <label>
-          Downloads pela internet (GB/mês)
+          {t("Internet downloads (GB/month)")}
           <input type="number" min="0" step="any" value={downloads} onChange={(event) => setDownloads(event.target.value)} />
         </label>
         <label>
-          Franquia ainda disponível (GB)
+          {t("Remaining free allowance (GB)")}
           <input type="number" min="0" max="100" step="any" value={allowance} onChange={(event) => setAllowance(event.target.value)} />
         </label>
         <label>
-          Tarifa de saída (US$/GB){region ? ` · ${region}` : ""}
+          {t("Egress rate (USD/GB)")}{region ? ` · ${region}` : ""}
           <input type="number" min="0" step="any" value={rate} onChange={(event) => setManualRate(event.target.value)} />
         </label>
       </div>
-      {loadingPrices && <p role="status">Consultando tarifas da AWS…</p>}
+      {loadingPrices && <p role="status">{t("Fetching AWS rates…")}</p>}
       {!loadingPrices && (
         <p>
-          {useTransferTiers ? "Saída calculada por faixas do catálogo público AWS para a região do bucket."
-            : "Saída calculada com uma tarifa única editável."}
-          {storageTiers.length > 0 ? " Armazenamento calculado com a tarifa AWS da classe configurada."
-            : " Armazenamento usa a estimativa local de referência."}
+          {useTransferTiers ? t("Egress uses tiered rates from the public AWS price list for the bucket's region.")
+            : t("Egress uses a single editable rate.")}
+          {storageTiers.length > 0 ? t(" Storage uses the AWS rate for the configured storage class.")
+            : t(" Storage uses the local baseline estimate.")}
           {manualRate !== null && firstRate !== undefined && (
-            <> <button type="button" className="row-act-btn" onClick={() => setManualRate(null)}>Usar tarifa AWS</button></>
+            <> <button type="button" className="row-act-btn" onClick={() => setManualRate(null)}>{t("Use AWS rate")}</button></>
           )}
         </p>
       )}
-      <p>A franquia de até 100 GB/mês é compartilhada com outros serviços e regiões elegíveis da AWS. Informe quanto dela ainda está disponível.</p>
+      <p>{t("The allowance of up to 100 GB per month is shared across eligible AWS services and regions. Enter how much remains available.")}</p>
       <dl className="cost-forecast-totals" aria-live="polite">
-        <div><dt>Armazenamento</dt><dd>{usd.format(monthlyStorage)}</dd></div>
-        <div><dt>Entrada pela internet</dt><dd>{usd.format(0)}</dd></div>
+        <div><dt>{t("Storage")}</dt><dd>{usd.format(monthlyStorage)}</dd></div>
+        <div><dt>{t("Internet ingress")}</dt><dd>{usd.format(0)}</dd></div>
         <div>
-          <dt>Saída pela internet</dt>
-          <dd>{transferUsd === null ? "Informe a tarifa" : usd.format(transferUsd)}</dd>
+          <dt>{t("Internet egress")}</dt>
+          <dd>{transferUsd === null ? t("Enter a rate") : usd.format(transferUsd)}</dd>
         </div>
-        <div className="cost-forecast-total"><dt>Total estimado / mês</dt><dd>{totalUsd === null ? "—" : usd.format(totalUsd)}</dd></div>
+        <div className="cost-forecast-total"><dt>{t("Estimated total / month")}</dt><dd>{totalUsd === null ? "—" : usd.format(totalUsd)}</dd></div>
       </dl>
-      <p>A simulação usa o volume rastreado e a classe configurada. Requisições, recuperação de dados, aceleração, mínimos por objeto e impostos ficam fora da conta.</p>
+      <p>{t("The forecast uses tracked volume and the configured storage class. It excludes requests, retrieval, acceleration, per-object minimums, and taxes.")}</p>
     </section>
   );
 }

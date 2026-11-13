@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 export interface NotificationSettings {
   sync_complete_enabled: boolean;
   conflict_enabled: boolean;
@@ -135,14 +137,14 @@ export function validateCredentialsFormat(creds: AwsCredentials): ValidationErro
       errors.push({
         field: "access_key_id",
         reason:
-          "Access Key ID deve conter exatamente 20 caracteres alfanuméricos maiúsculos.",
+          t("Access Key ID must contain exactly 20 uppercase alphanumeric characters."),
       });
     }
 
     if (Array.from(creds.secret_access_key).length !== 40) {
       errors.push({
         field: "secret_access_key",
-        reason: "Secret Access Key deve conter exatamente 40 caracteres.",
+        reason: t("Secret Access Key must contain exactly 40 characters."),
       });
     }
   }
@@ -150,7 +152,7 @@ export function validateCredentialsFormat(creds: AwsCredentials): ValidationErro
   if (!/^[a-z]{2}-[a-z]+-\d$/.test(creds.region)) {
     errors.push({
       field: "region",
-      reason: "AWS Region inválida (ex: us-east-1, sa-east-1).",
+      reason: t("Invalid AWS region (e.g. us-east-1, sa-east-1)."),
     });
   }
 

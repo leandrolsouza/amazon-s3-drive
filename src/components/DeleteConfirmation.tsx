@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useSyncStore } from "../store";
+import { t } from "../i18n";
 
 interface Props {
   keysToDelete: string[];
@@ -23,15 +24,15 @@ export function DeleteConfirmation({ keysToDelete, busy, failed, onCancel, onCon
   return (
     <dialog ref={dialog} className="delete-confirmation" aria-labelledby="delete-title" aria-describedby="delete-description"
       onCancel={(event) => { event.preventDefault(); if (!busy) onCancel(); }}>
-      <h2 id="delete-title">Excluir {keysToDelete.length} arquivo(s)?</h2>
-      <p id="delete-description">Os arquivos serão excluídos da pasta local e a remoção será enfileirada no bucket S3. Esta ação não pode ser desfeita pelo aplicativo.</p>
-      <p>Pasta: {config?.local_path || "Pasta configurada"}<br />Destino: {config?.bucket_name ? `s3://${config.bucket_name}/${config.s3_prefix || ""}` : "Bucket configurado"}</p>
+      <h2 id="delete-title">{t("Delete") + " "}{keysToDelete.length} {t("file(s)?")}</h2>
+      <p id="delete-description">{t("The files will be deleted from the local folder, and their removal from the S3 bucket will be queued. This action cannot be undone in the app.")}</p>
+      <p>{t("Folder:") + " "}{config?.local_path || t("Configured folder")}<br />{t("Destination:") + " "}{config?.bucket_name ? `s3://${config.bucket_name}/${config.s3_prefix || ""}` : t("Configured bucket")}</p>
       <ul>{keysToDelete.map((key) => <li key={key}>{key}</li>)}</ul>
-      {failed && <p role="alert">Não foi possível concluir a exclusão. Alguns arquivos podem já ter sido removidos. Verifique o status antes de tentar novamente.</p>}
+      {failed && <p role="alert">{t("Could not complete deletion. Some files may already have been removed. Check the status before trying again.")}</p>}
       <div className="conflict-actions">
-        <button type="button" className="btn-compact" autoFocus disabled={busy} onClick={onCancel}>Cancelar</button>
+        <button type="button" className="btn-compact" autoFocus disabled={busy} onClick={onCancel}>{t("Cancel")}</button>
         <button type="button" className="btn-compact btn-danger-compact" disabled={busy} onClick={onConfirm}>
-          {busy ? "Excluindo…" : "Excluir da pasta local e do S3"}
+          {busy ? t("Deleting…") : t("Delete from local folder and S3")}
         </button>
       </div>
     </dialog>

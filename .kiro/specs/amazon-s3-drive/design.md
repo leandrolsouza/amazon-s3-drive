@@ -1250,3 +1250,7 @@ Via Tauri's WebDriver API: fluxo completo de configuração → sync → status 
 - O updater do Tauri consulta o `latest.json` do GitHub Releases via HTTPS. A instalação valida a assinatura do pacote e a versão incluída na assinatura. O canal atende MSI e NSIS no Windows, macOS e AppImage no Linux. Pacotes DEB seguem o fluxo do gerenciador de pacotes.
 - A interface verifica ao abrir e pede confirmação para baixar, instalar e reiniciar. O backend baixa e verifica o pacote antes de encerrar os motores. O catálogo mantém as preferências de início e pausa para a retomada no próximo processo.
 - O workflow gera instaladores assinados e agrega o manifesto em uma release estável em rascunho. O manifesto e os pacotes precisam ficar acessíveis sem autenticação ao publicar. Builds locais com chave vazia seguem com o atualizador desabilitado.
+
+### Idioma
+
+O Tauri carrega a preferência do arquivo `language` no diretório de dados do aplicativo antes de criar a bandeja. O React consulta `get_language` antes de renderizar e usa inglês como padrão. Ao salvar pelo comando `set_language`, o React atualiza a interface e o Tauri atualiza o menu e a dica da bandeja. O catálogo português fica em `src/locales/pt-BR.json`.

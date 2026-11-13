@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { t } from "../i18n";
 
 export function AppUpdateNotice() {
   const [version, setVersion] = useState<string | null>(null);
@@ -30,12 +31,12 @@ export function AppUpdateNotice() {
   return (
     <div className={error ? "banner banner-error" : "banner"}>
       <span role={error ? "alert" : "status"}>
-        {error ? "Não foi possível atualizar o aplicativo. Tente novamente ou reabra o app."
-          : installing ? "Preparando a atualização. O aplicativo será reiniciado."
-          : `Versão ${version} disponível.`}
+        {error ? t("Could not update the app. Try again or reopen the app.")
+          : installing ? t("Preparing the update. The app will restart.")
+          : t("Version {0} is available.", version)}
       </span>
-      <button type="button" disabled={installing} onClick={install}>Atualizar e reiniciar</button>
-      <button type="button" disabled={installing} onClick={() => setVersion(null)}>Agora não</button>
+      <button type="button" disabled={installing} onClick={install}>{t("Update and restart")}</button>
+      <button type="button" disabled={installing} onClick={() => setVersion(null)}>{t("Not now")}</button>
     </div>
   );
 }

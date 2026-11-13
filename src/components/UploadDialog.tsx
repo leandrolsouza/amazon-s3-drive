@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "../store";
+import { t, locale } from "../i18n";
 
 const NEW_FOLDER = "/";
 
@@ -64,7 +65,7 @@ export function UploadDialog({ currentFolder, initialPaths, onCancel, onImported
       const selected = await invoke<string[]>("open_files_dialog");
       if (selected?.length) setPaths((previous) => [...new Set([...previous, ...selected])]);
     } catch {
-      setError("Não foi possível abrir o seletor de arquivos.");
+      setError(t("Could not open the file picker."));
     } finally {
       setPending(null);
     }
@@ -80,9 +81,9 @@ export function UploadDialog({ currentFolder, initialPaths, onCancel, onImported
         targetSubfolder: targetFolder || null,
       });
       if (count > 0) onImported(count);
-      else setError("Nenhum arquivo foi importado. Confira se os arquivos ainda estão disponíveis.");
+      else setError(t("No files were imported. Check that the files are still available."));
     } catch {
-      setError("Não foi possível concluir a importação. Confira a lista de objetos antes de tentar novamente.");
+      setError(t("Could not finish importing. Check the object list before trying again."));
     } finally {
       setPending(null);
     }
@@ -91,43 +92,43 @@ export function UploadDialog({ currentFolder, initialPaths, onCancel, onImported
   return (
     <dialog ref={dialog} className="delete-confirmation upload-dialog" aria-labelledby="upload-title"
       onCancel={(event) => { event.preventDefault(); if (!pending) onCancel(); }}>
-      <h2 id="upload-title">Enviar arquivos</h2>
+      <h2 id="upload-title">{t("Upload files")}</h2>
       <div className="upload-fields">
-        <label htmlFor="upload-folder">Pasta de destino</label>
+        <label htmlFor="upload-folder">{t("Destination folder")}</label>
         <select id="upload-folder" value={folder} disabled={Boolean(pending)} onChange={(event) => setFolder(event.target.value)}>
-          <option value="">Raiz da sincronização</option>
-          {[...folders].sort((a, b) => a.localeCompare(b, "pt-BR")).map((name) => <option key={name}>{name}</option>)}
-          <option value={NEW_FOLDER}>Nova pasta…</option>
+          <option value="">{t("Sync root")}</option>
+          {[...folders].sort((a, b) => a.localeCompare(b, locale)).map((name) => <option key={name}>{name}</option>)}
+          <option value={NEW_FOLDER}>{t("New folder…")}</option>
         </select>
         {creatingFolder && (
           <>
-            <label htmlFor="upload-new-folder">Caminho da nova pasta</label>
-            <input id="upload-new-folder" value={newFolder} placeholder="Ex.: documentos/2026"
+            <label htmlFor="upload-new-folder">{t("New folder path")}</label>
+            <input id="upload-new-folder" value={newFolder} placeholder={t("E.g. documents/2026")}
               disabled={Boolean(pending)} onChange={(event) => setNewFolder(event.target.value)} />
-            {targetFolder && !validFolder && <p role="alert" className="field-error">Informe um caminho relativo válido, separando as pastas com /.</p>}
+            {targetFolder && !validFolder && <p role="alert" className="field-error">{t("Enter a valid relative path, using / between folders.")}</p>}
           </>
         )}
         {config?.bucket_name && validFolder && <small className="upload-destination">s3://{config.bucket_name}/{destination}</small>}
-        <div>Classe de armazenamento <strong>{config?.storage_class || "STANDARD"}</strong> <small>· definida em Configurações</small></div>
+        <div>{t("Storage class") + " "}<strong>{config?.storage_class || "STANDARD"}</strong> <small>{t("· set in Settings")}</small></div>
         <button type="button" className="btn-compact" autoFocus disabled={Boolean(pending)} onClick={chooseFiles}>
-          {paths.length ? "Adicionar arquivos" : "Selecionar arquivos"}
+          {paths.length ? t("Add files") : t("Select files")}
         </button>
         {paths.length > 0 && (
-          <ul aria-label="Arquivos selecionados">
+          <ul aria-label={t("Selected files")}>
             {paths.map((path) => {
               const name = path.split(/[\\/]/).pop() || path;
               return <li key={path}><span>{name}</span><button type="button" className="row-act-btn" disabled={Boolean(pending)}
-                aria-label={`Remover ${name}`} onClick={() => setPaths((previous) => previous.filter((entry) => entry !== path))}>Remover</button></li>;
+                aria-label={t("Remove {0}", name)} onClick={() => setPaths((previous) => previous.filter((entry) => entry !== path))}>{t("Remove")}</button></li>;
             })}
           </ul>
         )}
-        {!canUpload && <p role="status">Configure um destino com envio habilitado para continuar.</p>}
+        {!canUpload && <p role="status">{t("Configure a destination with uploads enabled to continue.")}</p>}
         {error && <p role="alert" className="field-error">{error}</p>}
       </div>
       <div className="upload-actions">
-        <button type="button" className="btn-compact" disabled={Boolean(pending)} onClick={onCancel}>Cancelar</button>
+        <button type="button" className="btn-compact" disabled={Boolean(pending)} onClick={onCancel}>{t("Cancel")}</button>
         <button type="button" className="btn-primary-compact" disabled={!canUpload || !validFolder || !paths.length || Boolean(pending)} onClick={upload}>
-          {pending === "importing" ? "Importando…" : "Confirmar envio"}
+          {pending === "importing" ? t("Importing…") : t("Confirm upload")}
         </button>
       </div>
     </dialog>

@@ -1,3 +1,4 @@
+use crate::language::tr;
 use super::*;
 use crate::models::DeletionReview;
 use rusqlite::params;
@@ -103,7 +104,7 @@ impl SyncEngine {
         let relative_key = scoped_key(key, &cfg)?;
         if !expected.queued && !cfg.sync_direction.eq_ignore_ascii_case("Bidirectional") {
             return Err(SyncError::Conflict(
-                "A direção da sincronização mudou. Revise a configuração.".into(),
+                tr("The sync direction changed. Review the settings.", "A direção da sincronização mudou. Revise a configuração.").into(),
             ));
         }
         fs::read_dir(&cfg.local_path).map_err(|e| SyncError::Io(e.to_string()))?;
@@ -111,17 +112,17 @@ impl SyncEngine {
             .deletion_reviews()?
             .into_iter()
             .find(|r| r.s3_key == key)
-            .ok_or_else(|| SyncError::Conflict("Exclusão não está mais pendente.".into()))?;
+            .ok_or_else(|| SyncError::Conflict(tr("The deletion is no longer pending.", "Exclusão não está mais pendente.").into()))?;
         if &review != expected {
             return Err(SyncError::Conflict(
-                "A revisão mudou. Confira os dados atualizados antes de confirmar.".into(),
+                tr("The review changed. Check the updated details before confirming.", "A revisão mudou. Confira os dados atualizados antes de confirmar.").into(),
             ));
         }
         if !path_within_sync_folder(Path::new(&review.local_path), Path::new(&cfg.local_path))
             || is_excluded(Path::new(&review.local_path), &cfg.exclusion_patterns)
         {
             return Err(SyncError::Conflict(
-                "Arquivo fora da pasta sincronizada ou excluído pela configuração.".into(),
+                tr("The file is outside the synced folder or excluded by the settings.", "Arquivo fora da pasta sincronizada ou excluído pela configuração.").into(),
             ));
         }
         let client = self
@@ -129,7 +130,7 @@ impl SyncEngine {
             .read()
             .unwrap()
             .clone()
-            .ok_or_else(|| SyncError::Credentials("Cliente S3 não inicializado.".into()))?;
+            .ok_or_else(|| SyncError::Credentials(tr("The S3 client has not been initialized.", "Cliente S3 não inicializado.").into()))?;
         let remote = client
             .list_objects(cfg.s3_prefix.as_deref())
             .await?
@@ -147,7 +148,7 @@ impl SyncEngine {
         if remote.as_ref().map(|o| &o.etag) != review.remote_etag.as_ref()
             || local_hash != review.local_hash
         {
-            return Err(SyncError::Conflict("O arquivo mudou desde a revisão. Aguarde a próxima verificação e revise novamente.".into()));
+            return Err(SyncError::Conflict(tr("The file changed since the review. Wait for the next scan and review it again.", "O arquivo mudou desde a revisão. Aguarde a próxima verificação e revise novamente.").into()));
         }
         let stamp = Utc::now().timestamp_nanos_opt().unwrap_or_default();
         if restore {
@@ -173,7 +174,7 @@ impl SyncEngine {
                     != review.remote_etag.clone().unwrap_or_default()
                 {
                     return Err(SyncError::Conflict(
-                        "A versão remota mudou; exclusão cancelada.".into(),
+                        tr("The remote version changed. Deletion was canceled.", "A versão remota mudou; exclusão cancelada.").into(),
                     ));
                 }
                 client
@@ -187,7 +188,7 @@ impl SyncEngine {
                 fs::create_dir_all(&trash_dir).map_err(|e| SyncError::Io(e.to_string()))?;
                 let name = path
                     .file_name()
-                    .ok_or_else(|| SyncError::Io("Nome inválido.".into()))?;
+                    .ok_or_else(|| SyncError::Io(tr("Invalid name.", "Nome inválido.").into()))?;
                 let trash_path = trash_dir.join(name);
                 require_local_path(&trash_path, Path::new(&cfg.local_path))?;
                 fs::rename(path, trash_path).map_err(|e| SyncError::Io(e.to_string()))?;

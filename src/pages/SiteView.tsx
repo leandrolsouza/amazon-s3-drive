@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "../store";
 import { formatBytes } from "./StatusView";
+import { t, locale } from "../i18n";
 
 type SiteSource = { kind: "local"; folder: string } | { kind: "s3"; prefix: string };
 type SiteFile = { key: string; size: number; revision: string };
@@ -32,7 +33,7 @@ function suggestedBucket(source: SiteSource, sourceBucket: string, sourcePrefix:
   const normalized = name.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 63).replace(/^-+|-+$/g, "");
   if (validBucket(normalized) && normalized !== sourceBucket) return normalized;
-  return normalized ? "site-" + normalized.slice(0, 54).replace(/-+$/g, "") + "-web" : "meu-site";
+  return normalized ? "site-" + normalized.slice(0, 54).replace(/-+$/g, "") + "-web" : t("my-site");
 }
 
 export function SiteView({ active }: { active: boolean }) {
@@ -43,8 +44,8 @@ export function SiteView({ active }: { active: boolean }) {
   const sourcePrefix = config?.s3_prefix?.replace(/^\/+|\/+$/g, "") ?? "";
   if (!region || customEndpoint) {
     return <SitePane><p className="banner">{customEndpoint
-      ? "A publicação está disponível para conexões diretas com a AWS."
-      : "Configure a conexão com a AWS para publicar."}</p></SitePane>;
+      ? t("Publishing is available with a direct AWS connection.")
+      : t("Set up your AWS connection to publish.")}</p></SitePane>;
   }
   return <SiteWorkspace
     key={JSON.stringify([region, sourceBucket, sourcePrefix, config?.use_iam_role])}
@@ -144,7 +145,7 @@ function SiteWorkspace({ active, sourceBucket, sourcePrefix, region }: {
 
   function browse(prefix: string) {
     setPreview(null);
-    void run("Consultando pastas no S3…", async () => {
+    void run(t("Loading S3 folders…"), async () => {
       const result = await invoke<SiteFolder>("browse_site_source", { prefix });
       setRemoteFolder(result);
       if (!bucketEdited) setBucket(suggestedBucket({ kind: "s3", prefix }, sourceBucket, sourcePrefix));
@@ -167,7 +168,7 @@ function SiteWorkspace({ active, sourceBucket, sourcePrefix, region }: {
       ? { kind: "local", folder }
       : { kind: "s3", prefix: remoteFolder?.prefix ?? "" };
     setPreview(null);
-    void run("Preparando a lista de arquivos…", async () => {
+    void run(t("Preparing the file list…"), async () => {
       const result = await invoke<SiteFile[]>("preview_site_source", { source });
       setPreview({ source, files: result });
       setSelected(new Set(result.map((file) => file.key)));
@@ -194,10 +195,10 @@ function SiteWorkspace({ active, sourceBucket, sourcePrefix, region }: {
     event.preventDefault();
     if (busy || catalogLoading || !preview || !selected.has("index.html") || !validDestination) return;
     const destination = site ? { kind: "existing", id: site.id } : { kind: "new", bucket: bucket.trim() };
-    void run("Publicando e aguardando o CloudFront…", async () => {
+    void run(t("Publishing and waiting for CloudFront…"), async () => {
       const published = await invoke<PublishedSite>("publish_site", { source: preview.source, files, destination });
       saveSite(published);
-      setFeedback("Site publicado.");
+      setFeedback(t("Site published."));
       if (preview.source.kind === "local") {
         try {
           localStorage.setItem(folderPreference, preview.source.folder);
@@ -209,26 +210,26 @@ function SiteWorkspace({ active, sourceBucket, sourcePrefix, region }: {
   }
 
   function showHistory(id: string) {
-    void run("Consultando versões…", async () => {
+    void run(t("Loading releases…"), async () => {
       setReleases(await invoke<SiteRelease[]>("list_site_releases", { id }));
       setRestoreChoice(null);
     });
   }
 
   function restore(id: string, release: string) {
-    void run("Restaurando a versão no CloudFront…", async () => {
+    void run(t("Restoring the release in CloudFront…"), async () => {
       const published = await invoke<PublishedSite>("restore_site_release", { id, release });
       saveSite(published);
-      setFeedback("Versão restaurada.");
+      setFeedback(t("Release restored."));
     });
   }
 
   async function copyLink(url: string) {
     try {
       await navigator.clipboard.writeText(url);
-      setFeedback("Link copiado.");
+      setFeedback(t("Link copied."));
     } catch {
-      setFeedback("Selecione e copie o endereço no campo Link público.");
+      setFeedback(t("Select and copy the address in the Public link field."));
     }
   }
 
@@ -238,43 +239,43 @@ function SiteWorkspace({ active, sourceBucket, sourcePrefix, region }: {
         <label htmlFor="site-destination">Site</label>
         <div className="site-input-row">
           <select id="site-destination" value={siteId} disabled={Boolean(busy) || catalogLoading} onChange={(event) => changeSite(event.target.value)}>
-            <option value="">Criar outro site</option>
+            <option value="">{t("Create another site")}</option>
             {sites.map((item) => <option key={item.id} value={item.id}>{item.bucket}</option>)}
           </select>
-          <button type="button" className="btn-compact" disabled={Boolean(busy) || catalogLoading} onClick={() => setCatalogAttempt((value) => value + 1)}>Atualizar sites</button>
+          <button type="button" className="btn-compact" disabled={Boolean(busy) || catalogLoading} onClick={() => setCatalogAttempt((value) => value + 1)}>{t("Refresh sites")}</button>
         </div>
-        {catalogLoading && <p role="status">Consultando sites na AWS…</p>}
+        {catalogLoading && <p role="status">{t("Loading sites from AWS…")}</p>}
         {catalogError && <p className="banner banner-error" role="alert">{catalogError}</p>}
         {site && (
           <>
-            {site.url && <label htmlFor="site-url">Link público</label>}
+            {site.url && <label htmlFor="site-url">{t("Public link")}</label>}
             <div className="site-input-row">
               {site.url && (
                 <>
                   <input id="site-url" type="text" className="mono" readOnly value={site.url} onFocus={(event) => event.currentTarget.select()} />
-                  <button type="button" className="btn-compact" onClick={() => { if (site.url) void copyLink(site.url); }}>Copiar link</button>
+                  <button type="button" className="btn-compact" onClick={() => { if (site.url) void copyLink(site.url); }}>{t("Copy link")}</button>
                 </>
               )}
-              <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => showHistory(site.id)}>Versões</button>
+              <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => showHistory(site.id)}>{t("Releases")}</button>
             </div>
           </>
         )}
         {site && releases && (
-          <section className="site-review" aria-label="Versões do site">
-            <h3>Versões do site</h3>
-            {!releases.length && <p>Nenhuma versão registrada.</p>}
+          <section className="site-review" aria-label={t("Site releases")}>
+            <h3>{t("Site releases")}</h3>
+            {!releases.length && <p>{t("No releases found.")}</p>}
             <ul>
               {releases.map((release) => (
                 <li key={release.id}>
-                  <span>{release.timestamp_ms === null ? release.id.slice(0, 8) : new Date(release.timestamp_ms).toLocaleString("pt-BR")}{release.active ? " · Ativa" : ""}</span>
+                  <span>{release.timestamp_ms === null ? release.id.slice(0, 8) : new Date(release.timestamp_ms).toLocaleString(locale)}{release.active ? t(" · Active") : ""}</span>
                   {!release.active && (
                     restoreChoice === release.id ? (
                       <div className="site-input-row">
-                        <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => restore(site.id, release.id)}>Confirmar restauração</button>
-                        <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => setRestoreChoice(null)}>Cancelar</button>
+                        <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => restore(site.id, release.id)}>{t("Confirm restore")}</button>
+                        <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => setRestoreChoice(null)}>{t("Cancel")}</button>
                       </div>
                     ) : (
-                      <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => setRestoreChoice(release.id)}>Restaurar versão</button>
+                      <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => setRestoreChoice(release.id)}>{t("Restore release")}</button>
                     )
                   )}
                 </li>
@@ -283,34 +284,34 @@ function SiteWorkspace({ active, sourceBucket, sourcePrefix, region }: {
           </section>
         )}
 
-        <label htmlFor="site-origin">Origem dos arquivos</label>
+        <label htmlFor="site-origin">{t("File source")}</label>
         <select id="site-origin" value={origin} disabled={Boolean(busy)} onChange={(event) => changeOrigin(event.target.value === "s3" ? "s3" : "local")}>
-          <option value="local">Pasta local</option>
-          <option value="s3" disabled={!sourceBucket}>Bucket sincronizado</option>
+          <option value="local">{t("Local folder")}</option>
+          <option value="s3" disabled={!sourceBucket}>{t("Synced bucket")}</option>
         </select>
         {origin === "local" ? (
           <>
-            <label htmlFor="site-folder">Pasta do site</label>
+            <label htmlFor="site-folder">{t("Site folder")}</label>
             <div className="site-input-row">
-              <input id="site-folder" type="text" value={folder} onChange={(event) => setSourceFolder(event.target.value)} disabled={Boolean(busy)} placeholder="Caminho completo da pasta" />
+              <input id="site-folder" type="text" value={folder} onChange={(event) => setSourceFolder(event.target.value)} disabled={Boolean(busy)} placeholder={t("Full folder path")} />
               {/Windows/i.test(navigator.userAgent) && (
-                <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => void run("Aguardando a escolha da pasta…", async () => {
+                <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => void run(t("Waiting for folder selection…"), async () => {
                   const path = await invoke<string | null>("open_path_dialog");
                   if (path) setSourceFolder(path);
-                })}>Escolher pasta</button>
+                })}>{t("Choose folder")}</button>
               )}
             </div>
           </>
         ) : (
-          <section className="site-review" aria-label="Pastas do bucket sincronizado">
+          <section className="site-review" aria-label={t("Folders in the synced bucket")}>
             <p className="mono">s3://{[sourceBucket, sourcePrefix, remoteFolder?.prefix].filter(Boolean).join("/")}/</p>
             <div className="site-input-row">
               {remoteFolder?.prefix && (
-                <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => browse(remoteFolder.prefix.split("/").slice(0, -1).join("/"))}>Voltar à pasta anterior</button>
+                <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => browse(remoteFolder.prefix.split("/").slice(0, -1).join("/"))}>{t("Back to parent folder")}</button>
               )}
-              {!remoteFolder && <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => browse("")}>Carregar pastas</button>}
+              {!remoteFolder && <button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => browse("")}>{t("Load folders")}</button>}
             </div>
-            {remoteFolder && !remoteFolder.has_index && <p>Selecione uma pasta com index.html na raiz.</p>}
+            {remoteFolder && !remoteFolder.has_index && <p>{t("Select a folder with index.html at its root.")}</p>}
             {remoteFolder && (
               <ul>{remoteFolder.folders.map((name) => (
                 <li key={name}><button type="button" className="btn-compact" disabled={Boolean(busy)} onClick={() => browse([remoteFolder.prefix, name].filter(Boolean).join("/"))}>{name}/</button></li>
@@ -321,36 +322,36 @@ function SiteWorkspace({ active, sourceBucket, sourcePrefix, region }: {
 
         {!site && (
           <>
-            <label htmlFor="site-bucket">Nome do novo bucket</label>
+            <label htmlFor="site-bucket">{t("New bucket name")}</label>
             <div className="site-input-row">
               <input id="site-bucket" type="text" value={bucket} maxLength={63} disabled={Boolean(busy)} onChange={(event) => { setBucketEdited(true); setBucket(event.target.value); }} />
               <button type="button" className="btn-compact" disabled={Boolean(busy) || !bucket.trim()} onClick={() => {
                 const suffix = Math.random().toString(36).slice(2, 7).padEnd(5, "0");
                 setBucketEdited(true);
                 setBucket((value) => value.trim().slice(0, 57).replace(/-+$/g, "") + "-" + suffix);
-              }}>Sugerir outro nome</button>
+              }}>{t("Suggest another name")}</button>
             </div>
-            {bucket.trim() && !validDestination && <p>Use um nome disponível, com 3 a 63 letras minúsculas, números ou hífens. Comece e termine com letra ou número.</p>}
+            {bucket.trim() && !validDestination && <p>{t("Use an available name of 3 to 63 lowercase letters, numbers, or hyphens. Start and end with a letter or number.")}</p>}
           </>
         )}
         <div>
-          <button type="button" className="btn-compact" disabled={Boolean(busy) || (origin === "local" ? !folder.trim() : !remoteFolder?.has_index)} onClick={review}>Revisar arquivos</button>
+          <button type="button" className="btn-compact" disabled={Boolean(busy) || (origin === "local" ? !folder.trim() : !remoteFolder?.has_index)} onClick={review}>{t("Review files")}</button>
         </div>
 
         {preview && (
           <section className="site-review" aria-labelledby="site-review-heading">
-            <h3 id="site-review-heading">Arquivos da publicação</h3>
-            <p>{files.length} de {preview.files.length} arquivos selecionados · {formatBytes(size)}</p>
-            <p>Destino em {region} · <strong>{site?.bucket ?? (bucket.trim() || "informe o nome do bucket")}</strong></p>
+            <h3 id="site-review-heading">{t("Files to publish")}</h3>
+            <p>{files.length} {t("of") + " "}{preview.files.length} {t("files selected ·") + " "}{formatBytes(size)}</p>
+            <p>{t("Destination in") + " "}{region} · <strong>{site?.bucket ?? (bucket.trim() || t("enter the bucket name"))}</strong></p>
             <ul>{preview.files.map((file) => (
               <li key={file.key}>
                 <label><input type="checkbox" checked={selected.has(file.key)} disabled={Boolean(busy) || file.key === "index.html"} onChange={() => toggleFile(file.key)} /> {file.key}</label>
                 <small>{formatBytes(file.size)}</small>
               </li>
             ))}</ul>
-            <p>Os arquivos selecionados ficarão acessíveis a qualquer pessoa com o link. A publicação pode gerar custos de S3 e CloudFront.</p>
+            <p>{t("Anyone with the link will be able to access the selected files. Publishing may incur S3 and CloudFront charges.")}</p>
             <div>
-              <button type="submit" className="btn-primary-compact" disabled={Boolean(busy) || catalogLoading || !validDestination}>{site?.url ? "Republicar" : "Publicar site"}</button>
+              <button type="submit" className="btn-primary-compact" disabled={Boolean(busy) || catalogLoading || !validDestination}>{site?.url ? t("Republish") : t("Publish site")}</button>
             </div>
           </section>
         )}

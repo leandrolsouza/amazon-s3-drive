@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "../store";
 import { ConflictEvent } from "../types";
+import { t } from "../i18n";
 
 export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ onOpenConfig }) => {
   const [resolutionErrors, setResolutionErrors] = useState<Record<string, string>>({});
@@ -50,7 +51,7 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
       }
       removeConflict(conflict.local_path);
     } catch {
-      setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: "Não foi possível resolver o conflito. Tente novamente escolhendo uma opção abaixo." }));
+      setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: t("Could not resolve the conflict. Choose an option below to try again.") }));
     } finally {
       setResolving((prev) => ({ ...prev, [conflict.local_path]: false }));
     }
@@ -66,7 +67,7 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
           className="notification-card notification-error"
         >
           <p>{credentialAlert}</p>
-          {onOpenConfig && <button type="button" onClick={onOpenConfig}>Revisar credenciais</button>}
+          {onOpenConfig && <button type="button" onClick={onOpenConfig}>{t("Review credentials")}</button>}
         </div>
       )}
 
@@ -78,16 +79,15 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
           className="notification-card notification-success"
         >
           <p>
-            Sincronização inicial concluída: {initialCompleteCount} arquivo(s)
-            sincronizado(s).
+            {t("Initial sync complete:") + " "}{initialCompleteCount} {t("file(s) synced.")}
           </p>
           <button
             type="button"
             className="toast-close"
-            title="Fechar"
+            title={t("Close")}
             onClick={() => setInitialCompleteCount(null)}
           >
-            <Icon name="close" /><span className="sr-only">Fechar</span>
+            <Icon name="close" /><span className="sr-only">{t("Close")}</span>
           </button>
         </div>
       )}
@@ -102,10 +102,10 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
             data-testid={`notification-error-${err.file}`}
             className="notification-card notification-error"
           >
-            <strong>Erro de sincronização: {err.file}</strong>
+            <strong>{t("Sync error:") + " "}{err.file}</strong>
             <p>{err.error}</p>
             <button type="button" onClick={() => dismissError(err.file)}>
-              Dispensar
+              {t("Dismiss")}
             </button>
           </div>
         ))}
@@ -119,35 +119,35 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
             data-testid={`notification-conflict-${conflict.file_name}`}
             className="notification-card notification-warning"
           >
-            <strong>Conflito detectado: {conflict.file_name}</strong>
+            <strong>{t("Conflict detected:") + " "}{conflict.file_name}</strong>
             <p>
               Local: {conflict.local_modified} ({conflict.local_size_bytes}{" "}
-              bytes) | Remoto: {conflict.remote_modified} (
+              {t("bytes) | Remote:") + " "}{conflict.remote_modified} (
               {conflict.remote_size_bytes} bytes)
             </p>
             {resolutionErrors[conflict.local_path] && <p role="alert">{resolutionErrors[conflict.local_path]}</p>}
-            {resolving[conflict.local_path] && <p role="status">Resolvendo conflito…</p>}
+            {resolving[conflict.local_path] && <p role="status">{t("Resolving conflict…")}</p>}
             <div className="conflict-actions">
               <button
                 type="button"
                 onClick={() => handleResolveConflict(conflict, "local")}
                 disabled={resolving[conflict.local_path]}
               >
-                Manter local
+                {t("Keep local")}
               </button>
               <button
                 type="button"
                 onClick={() => handleResolveConflict(conflict, "remote")}
                 disabled={resolving[conflict.local_path]}
               >
-                Manter remota
+                {t("Keep remote")}
               </button>
               <button
                 type="button"
                 onClick={() => handleResolveConflict(conflict, "both")}
                 disabled={resolving[conflict.local_path]}
               >
-                Manter ambas
+                {t("Keep both")}
               </button>
             </div>
           </div>

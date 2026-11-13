@@ -17,6 +17,7 @@ import "./styles.css";
 import { syncPresentation } from "./syncPresentation";
 import { AppConfig } from "./types";
 import { runSyncCommand } from "./syncCommands";
+import { initializeLocale, locale, t } from "./i18n";
 
 export const App: React.FC = () => {
   useSyncEvents();
@@ -73,7 +74,7 @@ export const App: React.FC = () => {
       setStartupError(null);
       try {
         const running = await invoke<boolean>("get_sync_running");
-        if (typeof running !== "boolean") throw new Error("Resposta inválida ao consultar o motor de sincronização.");
+        if (typeof running !== "boolean") throw new Error(t("Invalid response from the sync engine."));
         useSyncStore.getState().setSyncRunning(running);
         if (!running && !useSyncStore.getState().syncAction) await runSyncCommand("start_sync");
       } catch (error) {
@@ -108,6 +109,23 @@ export const App: React.FC = () => {
       unlisten?.();
     };
   }, []);
+
+  const [selectedLanguage, setSelectedLanguage] = useState(locale);
+  const [languageError, setLanguageError] = useState(false);
+  const [changingLanguage, setChangingLanguage] = useState(false);
+  const changeLanguage = async (language: string) => {
+    setChangingLanguage(true);
+    setLanguageError(false);
+    try {
+      await invoke("set_language", { language });
+      initializeLocale(language);
+      setSelectedLanguage(locale);
+      setChangingLanguage(false);
+    } catch {
+      setLanguageError(true);
+      setChangingLanguage(false);
+    }
+  };
 
   const handleOpenLocalFolder = async () => {
     if (!config?.local_path) return;
@@ -156,8 +174,8 @@ export const App: React.FC = () => {
   const activeFiles = fileStatuses.filter((file) => file.state.type === "Syncing");
   const activeFile = activeFiles[0];
   const progress = activeFile ? transferProgress[activeFile.path] : undefined;
-  const transferLabel = progress?.operation === "Upload" ? "Enviando"
-    : progress?.operation === "Download" ? "Baixando" : "Sincronizando";
+  const transferLabel = progress?.operation === "Upload" ? t("Uploading")
+    : progress?.operation === "Download" ? t("Downloading") : t("Syncing");
   const alertCount =
     conflicts.length + errors.filter((e) => e.retry_count >= 3).length;
 
@@ -189,7 +207,7 @@ export const App: React.FC = () => {
           </div>
 
           <div className="sidebar-group-label">WORKSPACE</div>
-          <nav className="sidebar-nav" aria-label="Navegação Principal">
+          <nav className="sidebar-nav" aria-label={t("Main navigation")}>
             <button
               type="button"
               className={activeTab === "buckets" ? "sidebar-link nav-active" : "sidebar-link"}
@@ -216,7 +234,7 @@ export const App: React.FC = () => {
                 >
                   <path d="M3 6h18M3 12h18M3 18h18" />
                 </svg>
-                <span>Status de Sincronização</span>
+                <span>{t("Sync Status")}</span>
               </span>
               <span className="sidebar-counter">{fileStatuses.length}</span>
             </button>
@@ -229,7 +247,7 @@ export const App: React.FC = () => {
             >
               <span className="sidebar-link-main">
                 <Icon name="chart" />
-                <span>Armazenamento</span>
+                <span>{t("Storage")}</span>
               </span>
             </button>
 
@@ -263,7 +281,7 @@ export const App: React.FC = () => {
                 >
                   <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
                 </svg>
-                <span>Configurações</span>
+                <span>{t("Settings")}</span>
               </span>
               {alertCount > 0 && (
                 <span className="sidebar-counter counter-alert">
@@ -291,7 +309,7 @@ export const App: React.FC = () => {
                   <polyline points="4 17 10 11 4 5" />
                   <line x1="12" y1="19" x2="20" y2="19" />
                 </svg>
-                <span>Logs & Diagnóstico</span>
+                <span>{t("Logs & Diagnostics")}</span>
               </span>
               {errors.length > 0 && (
                 <span className="sidebar-counter counter-alert">
@@ -301,22 +319,22 @@ export const App: React.FC = () => {
             </button>
           </nav>
 
-          <div className="sidebar-group-label">BUCKET PRINCIPAL</div>
+          <div className="sidebar-group-label">{t("PRIMARY BUCKET")}</div>
           <div className="sidebar-mount-info">
             <div className="mount-row">
               <span className="mount-key">BUCKET</span>
               <span className="mount-val mono">
-                {config?.bucket_name || "não definido"}
+                {config?.bucket_name || t("not set")}
               </span>
             </div>
             <div className="mount-row">
-              <span className="mount-key">REGIÃO</span>
+              <span className="mount-key">{t("REGION")}</span>
               <span className="mount-val mono">
                 {config?.aws_region || "—"}
               </span>
             </div>
             <div className="mount-row">
-              <span className="mount-key">PREFIXO</span>
+              <span className="mount-key">{t("PREFIX")}</span>
               <span className="mount-val mono">
                 {config?.s3_prefix || "/"}
               </span>
@@ -339,20 +357,28 @@ export const App: React.FC = () => {
                 >
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                 </svg>
-                <span>Abrir no Explorer</span>
+                <span>{t("Open Local Folder")}</span>
               </button>
             )}
           </div>
 
           <div className="sidebar-bottom">
+            <label className="language-select">
+              {t("Language")}
+              <select value={selectedLanguage} disabled={changingLanguage} onChange={(event) => void changeLanguage(event.target.value)}>
+                <option value="en-US" lang="en">English</option>
+                <option value="pt-BR" lang="pt-BR">Português (Brasil)</option>
+              </select>
+            </label>
+            {languageError && <p role="alert">{t("Could not save the language preference.")}</p>}
             <button
               type="button"
               className="theme-switch"
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
             >
-              <span className="theme-switch-label">Aparência</span>
+              <span className="theme-switch-label">{t("Appearance")}</span>
               <span className="theme-switch-value mono">
-                {theme === "dark" ? "DARK" : "LIGHT"}
+                {theme === "dark" ? t("DARK") : t("LIGHT")}
               </span>
             </button>
           </div>
@@ -365,23 +391,23 @@ export const App: React.FC = () => {
           {activeTab !== "buckets" && <DeletionReviewPanel />}
           {startupError && (
             <div role="alert" className="banner banner-error">
-              Não foi possível iniciar a sincronização: {startupError}
-              <button type="button" onClick={() => { startupAttempted.current = false; setStartupRetry((attempt) => attempt + 1); }}>Tentar novamente</button>
-              <button type="button" onClick={() => setActiveTab("config")}>Ver configurações</button>
+              {t("Could not start sync:") + " "}{startupError}
+              <button type="button" onClick={() => { startupAttempted.current = false; setStartupRetry((attempt) => attempt + 1); }}>{t("Try again")}</button>
+              <button type="button" onClick={() => setActiveTab("config")}>{t("View settings")}</button>
             </div>
           )}
           {folderError && (
             <div role="alert" className="banner banner-error">
-              Não foi possível abrir a pasta local.
-              <button type="button" onClick={handleOpenLocalFolder}>Tentar novamente</button>
-              <button type="button" onClick={() => setFolderError(false)}>Dispensar</button>
+              {t("Could not open the local folder.")}
+              <button type="button" onClick={handleOpenLocalFolder}>{t("Try again")}</button>
+              <button type="button" onClick={() => setFolderError(false)}>{t("Dismiss")}</button>
             </div>
           )}
           <main className="workspace-content">
             {!configLoaded ? (
               <div className="banner" role={configLoadError ? "alert" : "status"}>
-                {configLoadError ? "Não foi possível carregar a configuração." : "Carregando configuração…"}
-                {configLoadError && <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Tentar novamente</button>}
+                {configLoadError ? t("Could not load settings.") : t("Loading settings…")}
+                {configLoadError && <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>{t("Try again")}</button>}
               </div>
             ) : <>
               <div style={{ display: activeTab === "config" ? "flex" : "none", flex: 1, minHeight: 0, flexDirection: "column" }}>
@@ -422,7 +448,7 @@ export const App: React.FC = () => {
           <span className="statusbar-sep" />
 
           <span className="statusbar-item mono">
-            {config?.bucket_name ? `s3://${config.bucket_name}` : "sem bucket"}
+            {config?.bucket_name ? `s3://${config.bucket_name}` : t("no bucket")}
           </span>
 
           {config?.local_path && (
@@ -449,11 +475,11 @@ export const App: React.FC = () => {
 
         <div className="statusbar-right">
           <span className="statusbar-item mono">
-            FILA: {queueStats.pending_count}/10000
+            {t("QUEUE:") + " "}{queueStats.pending_count}/10000
           </span>
           <span className="statusbar-sep" />
           <span className="statusbar-item mono">
-            ARQUIVOS: {syncedCount}/{fileStatuses.length}
+            {t("FILES:") + " "}{syncedCount}/{fileStatuses.length}
           </span>
           <span className="statusbar-sep" />
           <span className="statusbar-item mono">{formatBytes(totalBytes)}</span>

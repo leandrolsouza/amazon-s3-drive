@@ -8,6 +8,7 @@ import {
   ValidationError,
   validateCredentialsFormat,
 } from "../types";
+import { t } from "../i18n";
 
 const DEFAULT_CONFIG: AppConfig = {
   bucket_name: "",
@@ -96,7 +97,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             use_iam_role: loaded.use_iam_role,
           }));
         })
-        .catch(() => setErrorBanner("Não foi possível carregar a configuração. Reabra a tela para tentar novamente."));
+        .catch(() => setErrorBanner(t("Could not load settings. Reopen this screen to try again.")));
     }
   }, [initialConfig, storeConfig, setStoreConfig]);
 
@@ -140,7 +141,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       await invoke("save_config", { config: cfgToSave });
       setStoreConfig(cfgToSave);
       setSavedConfig(cfgToSave);
-      setStatusMessage("Configuração gravada.");
+      setStatusMessage(t("Settings saved."));
       return true;
     } catch (e) {
       setErrorBanner(String(e));
@@ -171,7 +172,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       setCredentialsSaved(true);
       setValidationErrors([]);
       setCreds((previous) => ({ ...previous, access_key_id: "", secret_access_key: "", session_token: "" }));
-      setStatusMessage("Credenciais gravadas no gerenciador seguro do sistema.");
+      setStatusMessage(t("Credentials saved to the system keyring."));
       return true;
     } catch (e) {
       setErrorBanner(String(e));
@@ -185,7 +186,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       const errors = validateCredentialsFormat({ ...creds, region: config.aws_region, use_iam_role: config.use_iam_role });
       if (errors.length) {
         setValidationErrors(errors);
-        setErrorBanner("Revise os campos de autenticação antes de salvar.");
+        setErrorBanner(t("Review the authentication fields before saving."));
         if (firstSetup) setSetupStep(0);
         return false;
       }
@@ -194,7 +195,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
     try {
       if (!await handleSaveConfig(config)) return false;
       if (credentialsEdited && !await handleSaveCredentials()) return false;
-      setStatusMessage("Alterações salvas.");
+      setStatusMessage(t("Changes saved."));
       return true;
     } finally {
       setIsSaving(false);
@@ -208,7 +209,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
     setIsTestingConn(true);
     try {
       await invoke("test_connection");
-      setStatusMessage("Acesso ao bucket S3 confirmado (HTTP 200).");
+      setStatusMessage(t("S3 bucket access confirmed (HTTP 200)."));
     } catch (e) {
       setErrorBanner(String(e));
     } finally {
@@ -256,7 +257,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
         setValidationErrors([
           {
             field: "exclusion_patterns",
-            reason: `Padrão glob inválido '${trimmed}'`,
+            reason: t("Invalid glob pattern '{0}'", trimmed),
           },
         ]);
         return;
@@ -300,7 +301,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
     try {
       const savedPath = await invoke<string | null>("export_config_profile");
       if (savedPath) {
-        setStatusMessage(`Perfil exportado com sucesso para: ${savedPath}`);
+        setStatusMessage(t("Profile exported to: {0}", savedPath));
       }
     } catch (e) {
       setErrorBanner(String(e));
@@ -314,7 +315,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       const imported = await invoke<AppConfig | null>("import_config_profile");
       if (imported) {
         setConfig(imported);
-        setStatusMessage("Perfil carregado para revisão. Clique em Salvar alterações para aplicar.");
+        setStatusMessage(t("Profile loaded for review. Select Save changes to apply it."));
       }
     } catch (e) {
       setErrorBanner(String(e));
@@ -326,24 +327,24 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
     setErrorBanner(null);
     if (setupStep === 0) {
       const errors: ValidationError[] = [];
-      if (!config.bucket_name.trim()) errors.push({ field: "bucket_name", reason: "Informe o bucket S3." });
+      if (!config.bucket_name.trim()) errors.push({ field: "bucket_name", reason: t("Enter the S3 bucket name.") });
       errors.push(...validateCredentialsFormat({ ...creds, region: config.aws_region, use_iam_role: config.use_iam_role || (credentialsSaved && !credentialsEdited) }));
       setValidationErrors(errors);
-      if (errors.length) { setErrorBanner("Revise os campos da conexão antes de continuar."); return; }
+      if (errors.length) { setErrorBanner(t("Review the connection fields before continuing.")); return; }
       setIsValidating(true);
       try {
         const errors = await invoke<ValidationError[]>("validate_config", { config });
         const connectionErrors = errors?.filter((error) => ["bucket_name", "aws_region", "endpoint_url"].includes(error.field)) || [];
         if (connectionErrors.length) { setValidationErrors(connectionErrors); setErrorBanner(connectionErrors.map((error) => error.reason).join(" ")); return; }
-      } catch { setErrorBanner("Não foi possível validar a conexão. Tente continuar novamente."); return; }
+      } catch { setErrorBanner(t("Could not validate the connection. Select Continue to try again.")); return; }
       finally { setIsValidating(false); }
     } else {
-      if (!config.local_path.trim()) { setValidationErrors([{ field: "local_path", reason: "Escolha a pasta local." }]); return; }
+      if (!config.local_path.trim()) { setValidationErrors([{ field: "local_path", reason: t("Choose the local folder.") }]); return; }
       setIsValidating(true);
       try {
         const errors = await invoke<ValidationError[]>("validate_config", { config });
         if (errors?.length) { setValidationErrors(errors); setErrorBanner(errors.map((error) => error.reason).join(" ")); return; }
-      } catch { setErrorBanner("Não foi possível validar a configuração. Tente continuar novamente."); return; }
+      } catch { setErrorBanner(t("Could not validate the settings. Select Continue to try again.")); return; }
       finally { setIsValidating(false); }
     }
     setValidationErrors([]);
@@ -355,7 +356,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       {/* Top Command Bar */}
       <header className="command-bar settings-command-bar">
         <div className="command-bar-left">
-          <h2 className="pane-title">{firstSetup ? "Configuração inicial" : "Preferências do Sistema"}</h2>
+          <h2 className="pane-title">{firstSetup ? t("Initial setup") : t("System Preferences")}</h2>
         </div>
         <div className="command-bar-right">
           <button
@@ -363,18 +364,18 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             className="btn-compact"
             onClick={handleImportProfile}
             disabled={isDirty || busy}
-            title={isDirty ? "Salve ou descarte as alterações antes de importar outro perfil." : "Carregar perfil JSON para revisão"}
+            title={isDirty ? t("Save or discard your changes before importing another profile.") : t("Load a JSON profile for review")}
           >
-            Importar JSON
+            {t("Import JSON")}
           </button>
           <button
             type="button"
             className="btn-compact"
             onClick={handleExportProfile}
             disabled={isDirty || busy}
-            title={isDirty ? "Salve ou descarte as alterações antes de exportar." : "Exportar configuração salva (sem credenciais)"}
+            title={isDirty ? t("Save or discard your changes before exporting.") : t("Export saved settings (without credentials)")}
           >
-            Exportar JSON
+            {t("Export JSON")}
           </button>
           <div className="toolbar-divider" />
           <button
@@ -383,7 +384,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             onClick={handleSaveAll}
             disabled={busy || (firstSetup && setupStep !== 2)}
           >
-            {isSaving ? "Salvando…" : "Salvar alterações"}
+            {isSaving ? t("Saving…") : t("Save changes")}
           </button>
           <button
             type="button"
@@ -391,7 +392,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             disabled={!canStartSync || busy || (firstSetup && setupStep !== 2)}
             onClick={handleStartSync}
           >
-            {syncAction === "starting" ? "Conectando…" : isDirty || firstSetup ? "Salvar e iniciar" : "Iniciar sincronização"}
+            {syncAction === "starting" ? t("Connecting…") : isDirty || firstSetup ? t("Save and start") : t("Start sync")}
           </button>
         </div>
       </header>
@@ -408,24 +409,24 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
       )}
 
       <div className="settings-save-state" role="status">
-        {isDirty ? "Alterações não salvas" : firstSetup ? "Complete as etapas para configurar a sincronização" : "Todas as alterações estão salvas"}
+        {isDirty ? t("Unsaved changes") : firstSetup ? t("Complete these steps to set up sync") : t("All changes are saved")}
         {isDirty && <button type="button" className="btn-compact" disabled={busy} onClick={() => {
           setConfig(savedConfig);
           setCreds({ access_key_id: "", secret_access_key: "", session_token: "", region: savedConfig.aws_region, use_iam_role: savedConfig.use_iam_role });
           setValidationErrors([]); setErrorBanner(null); setStatusMessage(null);
-        }}>Descartar alterações</button>}
+        }}>{t("Discard changes")}</button>}
       </div>
       <div className="settings-scroll">
-        {firstSetup && <ol className="setup-steps" aria-label="Etapas da configuração inicial">
-          {["Conexão", "Pasta e direção", "Revisão e início"].map((label, index) => <li key={label} aria-current={setupStep === index ? "step" : undefined}>{index + 1}. {label}</li>)}
+        {firstSetup && <ol className="setup-steps" aria-label={t("Initial setup steps")}>
+          {[t("Connection"), t("Folder and direction"), t("Review and start")].map((label, index) => <li key={label} aria-current={setupStep === index ? "step" : undefined}>{index + 1}. {label}</li>)}
         </ol>}
         <fieldset className="settings-fields" disabled={busy}>
         <section className="settings-group" hidden={firstSetup && setupStep !== 0}>
-          <div className="settings-group-header">CONEXÃO COM O S3</div>
+          <div className="settings-group-header">{t("S3 CONNECTION")}</div>
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="bucket_name">Nome do Bucket S3</label>
-              <span className="prop-sub">Identificador do bucket remoto</span>
+              <label htmlFor="bucket_name">{t("S3 Bucket Name")}</label>
+              <span className="prop-sub">{t("Remote bucket identifier")}</span>
             </div>
             <div className="prop-control-col">
               <div className="input-addon-row">
@@ -434,7 +435,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   id="bucket_name"
                   className="mono"
                   type="text"
-                  placeholder="meu-bucket-s3"
+                  placeholder={t("my-s3-bucket")}
                   value={config.bucket_name}
                   onChange={(e) =>
                     setConfig({ ...config, bucket_name: e.target.value })
@@ -450,8 +451,8 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           </div>
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="aws_region">Região AWS</label>
-              <span className="prop-sub">Endpoint regional do S3</span>
+              <label htmlFor="aws_region">{t("AWS Region")}</label>
+              <span className="prop-sub">{t("Regional S3 endpoint")}</span>
             </div>
             <div className="prop-control-col">
               <div className="control-inline">
@@ -495,12 +496,12 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             </div>
           </div>
           <details className="settings-advanced" open={Boolean(getFieldError("endpoint_url")) || undefined}>
-            <summary>Conexão avançada (endpoint personalizado)</summary>
+            <summary>{t("Advanced connection settings (custom endpoint)")}</summary>
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="endpoint_url">Endpoint S3 Customizado</label>
+              <label htmlFor="endpoint_url">{t("Custom S3 endpoint")}</label>
               <span className="prop-sub">
-                Opcional. Use HTTPS. HTTP é aceito apenas em IPs de loopback, como 127.0.0.1.
+                {t("Optional. Use HTTPS. HTTP is allowed only for loopback IP addresses such as 127.0.0.1.")}
               </span>
             </div>
             <div className="prop-control-col">
@@ -508,7 +509,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                 id="endpoint_url"
                 className="mono"
                 type="text"
-                placeholder="https://<account>.r2.cloudflarestorage.com (vazio = AWS S3)"
+                placeholder={t("https://<account>.r2.cloudflarestorage.com (blank = AWS S3)")}
                 value={config.endpoint_url ?? ""}
                 onChange={(e) =>
                   setConfig({
@@ -530,7 +531,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   }
                 />
                 <span>
-                  Usar Path-Style Addressing (recomendado para MinIO / LocalStack)
+                  {t("Use path-style addressing (recommended for MinIO / LocalStack)")}
                 </span>
               </label>
               {getFieldError("endpoint_url") && (
@@ -546,24 +547,24 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
         {/* Bloco 2: Credenciais AWS */}
         <section className="settings-group" hidden={firstSetup && setupStep !== 0}>
           <div className="settings-group-header">
-            <span>AUTENTICAÇÃO AWS (OS KEYRING)</span>
+            <span>{t("AWS AUTHENTICATION (SYSTEM KEYRING)")}</span>
             <div className="header-inline-actions">
               <button
                 type="button"
                 className="btn-compact"
                 disabled={busy || isDirty || firstSetup}
-                title="Testa a configuração salva. Salve as alterações antes de testar."
+                title={t("Tests the saved settings. Save changes before testing.")}
                 onClick={handleTestConnection}
               >
-                {isTestingConn ? "Verificando..." : "Testar Conexão"}
+                {isTestingConn ? t("Checking...") : t("Test Connection")}
               </button>
             </div>
           </div>
 
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="use_iam_role">Modo de Autenticação</label>
-              <span className="prop-sub">IAM Role do ambiente ou chaves</span>
+              <label htmlFor="use_iam_role">{t("Authentication Mode")}</label>
+              <span className="prop-sub">{t("Environment IAM role or access keys")}</span>
             </div>
             <div className="prop-control-col">
               <label htmlFor="use_iam_role" className="check-inline">
@@ -577,7 +578,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                     setCreds({ ...creds, use_iam_role: useIam });
                   }}
                 />
-                <span>Usar AWS IAM Role / Perfil de Instância</span>
+                <span>{t("Use AWS IAM role / instance profile")}</span>
               </label>
             </div>
           </div>
@@ -643,7 +644,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                       className="btn-compact"
                       onClick={() => setShowSecretKey(!showSecretKey)}
                     >
-                      {showSecretKey ? "Ocultar" : "Mostrar"}
+                      {showSecretKey ? t("Hide") : t("Show")}
                     </button>
                   </div>
                   {getFieldError("secret_access_key") && (
@@ -660,16 +661,16 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
               <div className="prop-row">
                 <div className="prop-label-col">
                   <label htmlFor="session_token">
-                    Session Token STS (Opcional)
+                    {t("STS Session Token (Optional)")}
                   </label>
-                  <span className="prop-sub">Credenciais temporárias AWS</span>
+                  <span className="prop-sub">{t("Temporary AWS credentials")}</span>
                 </div>
                 <div className="prop-control-col">
                   <input
                     id="session_token"
                     className="mono"
                     type="password"
-                    placeholder="Token STS opcional"
+                    placeholder={t("Optional STS token")}
                     value={creds.session_token ?? ""}
                     onChange={(e) =>
                       setCreds({ ...creds, session_token: e.target.value })
@@ -682,11 +683,11 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
         </section>
 
         <section className="settings-group" hidden={firstSetup && setupStep !== 1}>
-          <div className="settings-group-header">PASTA E DIREÇÃO</div>
+          <div className="settings-group-header">{t("FOLDER AND DIRECTION")}</div>
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="local_path">Pasta Local</label>
-              <span className="prop-sub">Diretório espelhado no sistema</span>
+              <label htmlFor="local_path">{t("Local Folder")}</label>
+              <span className="prop-sub">{t("Folder mirrored on this computer")}</span>
             </div>
             <div className="prop-control-col">
               <div className="control-inline">
@@ -694,7 +695,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   id="local_path"
                   className="mono"
                   type="text"
-                  placeholder="C:\Users\Usuario\S3Drive"
+                  placeholder={t("C:\\Users\\User\\S3Drive")}
                   value={config.local_path}
                   onChange={(e) =>
                     setConfig({ ...config, local_path: e.target.value })
@@ -705,7 +706,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   className="btn-compact"
                   onClick={handleSelectPath}
                 >
-                  Selecionar Pasta
+                  {t("Select Folder")}
                 </button>
               </div>
               {getFieldError("local_path") && (
@@ -717,15 +718,15 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           </div>
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="s3_prefix">Prefixo S3 (Opcional)</label>
-              <span className="prop-sub">Subdiretório remoto raiz</span>
+              <label htmlFor="s3_prefix">{t("S3 Prefix (Optional)")}</label>
+              <span className="prop-sub">{t("Remote root prefix")}</span>
             </div>
             <div className="prop-control-col">
               <input
                 id="s3_prefix"
                 className="mono"
                 type="text"
-                placeholder="ex: equipe/financeiro/"
+                placeholder={t("e.g. team/finance/")}
                 value={config.s3_prefix ?? ""}
                 onChange={(e) =>
                   setConfig({
@@ -738,9 +739,9 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           </div>
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="sync_direction">Direção de Sincronização</label>
+              <label htmlFor="sync_direction">{t("Sync Direction")}</label>
               <span className="prop-sub">
-                Modo de espelhamento entre Pasta Local e Bucket S3
+                {t("How changes are mirrored between the local folder and the S3 bucket")}
               </span>
             </div>
             <div className="prop-control-col">
@@ -748,15 +749,15 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                 {[
                   {
                     id: "Bidirectional",
-                    label: "Bidirecional (Local ↔ S3)",
+                    label: t("Bidirectional (Local ↔ S3)"),
                   },
                   {
                     id: "UploadOnly",
-                    label: "Backup (Apenas Upload → S3)",
+                    label: t("Backup (Upload Only → S3)"),
                   },
                   {
                     id: "DownloadOnly",
-                    label: "Espelho (Apenas Download ← S3)",
+                    label: t("Mirror (Download Only ← S3)"),
                   },
                 ].map((mode) => (
                   <button
@@ -780,36 +781,36 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
               </div>
             </div>
           </div>
-          <p className="settings-note">{config.sync_direction === "UploadOnly" ? "Envia alterações da pasta local ao S3." : config.sync_direction === "DownloadOnly" ? "Baixa alterações do S3 para a pasta local." : "Propaga alterações entre a pasta local e o S3 nos dois sentidos."} Revise a pasta e o destino antes de iniciar.</p>
+          <p className="settings-note">{config.sync_direction === "UploadOnly" ? t("Uploads changes from the local folder to S3.") : config.sync_direction === "DownloadOnly" ? t("Downloads changes from S3 to the local folder.") : t("Propagates changes between the local folder and S3 in both directions.")} {t("Review the folder and destination before starting.")}</p>
         </section>
 
         {firstSetup && setupStep === 2 && (
           <section className="settings-group setup-review">
-            <h3>Revise antes de iniciar</h3>
+            <h3>{t("Review before starting")}</h3>
             <dl>
-              <dt>Destino S3</dt><dd className="mono">s3://{config.bucket_name}/{config.s3_prefix || ""}</dd>
-              <dt>Região</dt><dd>{config.aws_region}</dd>
-              <dt>Pasta local</dt><dd className="mono">{config.local_path}</dd>
-              <dt>Direção</dt><dd>{config.sync_direction === "UploadOnly" ? "Somente envio ao S3" : config.sync_direction === "DownloadOnly" ? "Somente download do S3" : "Bidirecional (Local ↔ S3)"}</dd>
-              <dt>Autenticação</dt><dd>{config.use_iam_role ? "IAM Role do ambiente" : "Chaves no gerenciador seguro do sistema"}</dd>
+              <dt>{t("S3 destination")}</dt><dd className="mono">s3://{config.bucket_name}/{config.s3_prefix || ""}</dd>
+              <dt>{t("Region")}</dt><dd>{config.aws_region}</dd>
+              <dt>{t("Local folder")}</dt><dd className="mono">{config.local_path}</dd>
+              <dt>{t("Direction")}</dt><dd>{config.sync_direction === "UploadOnly" ? t("Upload to S3 only") : config.sync_direction === "DownloadOnly" ? t("Download from S3 only") : t("Bidirectional (Local ↔ S3)")}</dd>
+              <dt>{t("Authentication")}</dt><dd>{config.use_iam_role ? t("Environment IAM role") : t("Access keys in the system keyring")}</dd>
             </dl>
-            <p>Ao salvar e iniciar, a conexão será verificada e a sincronização poderá alterar arquivos nos destinos indicados.</p>
+            <p>{t("Saving and starting checks the connection. Sync may change files at the listed destinations.")}</p>
             <button type="button" className="btn-compact" disabled={busy || isDirty} onClick={handleTestConnection}>
-              {isTestingConn ? "Verificando…" : "Testar conexão salva"}
+              {isTestingConn ? t("Checking…") : t("Test saved connection")}
             </button>
-            {isDirty && <p>Salve as alterações para testar a conexão antes de iniciar.</p>}
+            {isDirty && <p>{t("Save your changes to test the connection before starting.")}</p>}
           </section>
         )}
         <details className="settings-advanced" hidden={firstSetup && setupStep !== 2}>
-          <summary>Ajustes avançados de sincronização</summary>
+          <summary>{t("Advanced sync settings")}</summary>
           <section className="settings-group">
-            <div className="settings-group-header">TRANSFERÊNCIAS E ARMAZENAMENTO</div>
+            <div className="settings-group-header">{t("TRANSFERS AND STORAGE")}</div>
           <div className="prop-row">
             <div className="prop-label-col">
               <label htmlFor="sync_interval_secs">
-                Intervalo de Sync (seg)
+                {t("Sync Interval (sec)")}
               </label>
-              <span className="prop-sub">Frequência de polling (1–60s)</span>
+              <span className="prop-sub">{t("Polling frequency (1–60 s)")}</span>
             </div>
             <div className="prop-control-col">
               <input
@@ -831,9 +832,9 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           <div className="prop-row">
             <div className="prop-label-col">
               <label htmlFor="max_concurrent_transfers">
-                Transferências Simultâneas
+                {t("Concurrent Transfers")}
               </label>
-              <span className="prop-sub">Worker pool paralelo (1–16)</span>
+              <span className="prop-sub">{t("Parallel workers (1–16)")}</span>
             </div>
             <div className="prop-control-col">
               <div className="control-inline">
@@ -880,9 +881,9 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           </div>
           <div className="prop-row">
             <div className="prop-label-col">
-              <label htmlFor="storage_class">Storage Class & Segurança</label>
+              <label htmlFor="storage_class">{t("Storage Class & Security")}</label>
               <span className="prop-sub">
-                Classe de armazenamento S3 e criptografia SSE-S3
+                {t("S3 storage class and SSE-S3 encryption")}
               </span>
             </div>
             <div className="prop-control-col">
@@ -925,7 +926,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   }
                 />
                 <span>
-                  Habilitar criptografia Server-Side AES-256 (SSE-S3) nos uploads
+                  {t("Enable AES-256 server-side encryption (SSE-S3) for uploads")}
                 </span>
               </label>
             </div>
@@ -933,10 +934,10 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
           <div className="prop-row">
             <div className="prop-label-col">
               <label htmlFor="bandwidth_limit_kbps">
-                Limite de Banda (KB/s)
+                {t("Bandwidth Limit (KB/s)")}
               </label>
               <span className="prop-sub">
-                0 = ilimitado (Throttling de rede)
+                {t("0 = unlimited (network throttling)")}
               </span>
             </div>
             <div className="prop-control-col">
@@ -960,7 +961,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                 />
                 <div className="preset-tags">
                   {[
-                    { val: 0, label: "Ilimitado" },
+                    { val: 0, label: t("Unlimited") },
                     { val: 1024, label: "1 MB/s" },
                     { val: 5120, label: "5 MB/s" },
                     { val: 10240, label: "10 MB/s" },
@@ -991,21 +992,21 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
         {/* Bloco 3: Filtros de Exclusão Glob */}
         <section className="settings-group">
           <div className="settings-group-header">
-            FILTROS DE EXCLUSÃO (GLOB PATTERNS)
+            {t("EXCLUSION FILTERS (GLOB PATTERNS)")}
           </div>
 
           <div className="prop-row">
             <div className="prop-label-col">
-              <label>Regras de Ignorados</label>
-              <span className="prop-sub">Omitidos no upload e download</span>
+              <label>{t("Ignore Rules")}</label>
+              <span className="prop-sub">{t("Skipped on upload and download")}</span>
             </div>
             <div className="prop-control-col">
               <div className="control-inline">
                 <input
-                  aria-label="Novo padrão de exclusão"
+                  aria-label={t("New exclusion pattern")}
                   className="mono"
                   type="text"
-                  placeholder="Ex: *.tmp, *.log, .DS_Store"
+                  placeholder={t("E.g. *.tmp, *.log, .DS_Store")}
                   value={newPattern}
                   onChange={(e) => setNewPattern(e.target.value)}
                   onKeyDown={(e) => {
@@ -1020,7 +1021,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   className="btn-compact"
                   onClick={handleAddPattern}
                 >
-                  Adicionar Padrão
+                  {t("Add Pattern")}
                 </button>
               </div>
 
@@ -1054,7 +1055,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                       <button
                         type="button"
                         className="chip-del"
-                        aria-label={`Remover ${pat}`}
+                        aria-label={t("Remove {0}", pat)}
                         onClick={() => handleRemovePattern(pat)}
                       >
                         ×
@@ -1069,12 +1070,12 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
 
         {/* Bloco 4: Notificações */}
         <section className="settings-group">
-          <div className="settings-group-header">EVENTOS & NOTIFICAÇÕES</div>
+          <div className="settings-group-header">{t("EVENTS & NOTIFICATIONS")}</div>
 
           <div className="prop-row">
             <div className="prop-label-col">
-              <span>Alertas do Sistema</span>
-              <span className="prop-sub">Comportamento de bandeja e UI</span>
+              <span>{t("System Alerts")}</span>
+              <span className="prop-sub">{t("Tray and interface behavior")}</span>
             </div>
             <div className="prop-control-col check-stack">
               <label htmlFor="notif_sync_complete" className="check-inline">
@@ -1090,7 +1091,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   }
                 />
                 <span>
-                  Notificar ao concluir a primeira sincronização completa
+                  {t("Notify when the first full sync completes")}
                 </span>
               </label>
 
@@ -1106,7 +1107,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                     )
                   }
                 />
-                <span>Notificar ao detectar conflitos de arquivos</span>
+                <span>{t("Notify when file conflicts are detected")}</span>
               </label>
 
               <label
@@ -1120,7 +1121,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   disabled={true}
                   readOnly
                 />
-                <span>Notificar erros de sincronização (Sempre ativo)</span>
+                <span>{t("Notify on sync errors (always on)")}</span>
               </label>
 
               <label htmlFor="launch_on_startup" className="check-inline">
@@ -1136,7 +1137,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                   }
                 />
                 <span>
-                  Iniciar Amazon S3 Drive automaticamente ao ligar o sistema (Autostart)
+                  {t("Launch Amazon S3 Drive at system startup")}
                 </span>
               </label>
             </div>
@@ -1145,8 +1146,8 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
         </details>
         </fieldset>
         {firstSetup && <div className="setup-actions">
-          <button type="button" className="btn-compact" disabled={setupStep === 0 || busy} onClick={() => { setSetupStep((step) => step - 1); setValidationErrors([]); setErrorBanner(null); }}>Voltar</button>
-          {setupStep < 2 && <button type="button" className="btn-primary-compact" disabled={busy} onClick={handleNextStep}>Continuar</button>}
+          <button type="button" className="btn-compact" disabled={setupStep === 0 || busy} onClick={() => { setSetupStep((step) => step - 1); setValidationErrors([]); setErrorBanner(null); }}>{t("Back")}</button>
+          {setupStep < 2 && <button type="button" className="btn-primary-compact" disabled={busy} onClick={handleNextStep}>{t("Continue")}</button>}
         </div>}
       </div>
     </div>

@@ -1,3 +1,4 @@
+use crate::language::tr;
 pub mod sources;
 
 use crate::{
@@ -53,7 +54,7 @@ pub async fn list_published_sites(
     let mut pages = client.list_stacks().into_paginator().send();
     while let Some(page) = pages.next().await {
         let page =
-            page.map_err(|error| aws_error("listar os sites no CloudFormation", error.code()))?;
+            page.map_err(|error| aws_error(tr("list sites in CloudFormation", "listar os sites no CloudFormation"), error.code()))?;
         for summary in page.stack_summaries() {
             let Some(name) = summary.stack_name() else {
                 continue;
@@ -86,7 +87,7 @@ pub async fn publish_site(
     let _publication = state
         .site_publication
         .try_lock()
-        .map_err(|_| "Já existe uma publicação em andamento.")?;
+        .map_err(|_| tr("Publishing is already in progress.", "Já existe uma publicação em andamento."))?;
     let config = load_config(&state)?;
     let sdk = sdk_config(&state, &config).await?;
     let cloudformation = cloudformation_client(&sdk);
@@ -95,19 +96,19 @@ pub async fn publish_site(
     let stack = match destination {
         SiteDestination::New { bucket } => {
             if !valid_bucket_name(&bucket) {
-                return Err("Use de 3 a 63 letras minúsculas, números e hífens no nome do bucket. Comece e termine com letra ou número e evite prefixos e sufixos reservados pelo S3.".into());
+                return Err(tr("Use 3 to 63 lowercase letters, numbers, and hyphens in the bucket name. Start and end with a letter or number and avoid S3 reserved prefixes and suffixes.", "Use de 3 a 63 letras minúsculas, números e hífens no nome do bucket. Comece e termine com letra ou número e evite prefixos e sufixos reservados pelo S3.").into());
             }
             if bucket == config.bucket_name.trim() {
-                return Err("Escolha um nome diferente do bucket de sincronização.".into());
+                return Err(tr("Choose a name different from the sync bucket name.", "Escolha um nome diferente do bucket de sincronização.").into());
             }
             create_or_resume_site(&cloudformation, &s3, &bucket).await?
         }
         SiteDestination::Existing { id } => require_site(&cloudformation, &id).await?,
     };
     ensure_writable(&stack)?;
-    let bucket = stack_output(&stack, "Bucket").ok_or("Bucket de publicação indisponível.")?;
+    let bucket = stack_output(&stack, "Bucket").ok_or(tr("The publishing bucket is unavailable.", "Bucket de publicação indisponível."))?;
     if bucket == config.bucket_name.trim() {
-        return Err("Escolha um destino separado do bucket de sincronização.".into());
+        return Err(tr("Choose a destination separate from the sync bucket.", "Escolha um destino separado do bucket de sincronização.").into());
     }
     let release = format!("{:032x}", rand::random::<u128>());
     if let Some(previous) = active_release(&stack) {
@@ -126,7 +127,7 @@ pub async fn list_site_releases(
     let config = load_config(&state)?;
     let sdk = sdk_config(&state, &config).await?;
     let stack = require_site(&cloudformation_client(&sdk), &id).await?;
-    let bucket = stack_output(&stack, "Bucket").ok_or("Bucket de publicação indisponível.")?;
+    let bucket = stack_output(&stack, "Bucket").ok_or(tr("The publishing bucket is unavailable.", "Bucket de publicação indisponível."))?;
     let active = active_release(&stack);
     let s3 = s3_client(&sdk);
     let mut pages = s3
@@ -137,7 +138,7 @@ pub async fn list_site_releases(
         .send();
     let mut releases = Vec::new();
     while let Some(page) = pages.next().await {
-        let page = page.map_err(|error| aws_error("listar as versões do site", error.code()))?;
+        let page = page.map_err(|error| aws_error(tr("list site releases", "listar as versões do site"), error.code()))?;
         for object in page.contents() {
             let Some(id) = object
                 .key()
@@ -179,9 +180,9 @@ pub async fn restore_site_release(
     let _publication = state
         .site_publication
         .try_lock()
-        .map_err(|_| "Já existe uma publicação em andamento.")?;
+        .map_err(|_| tr("Publishing is already in progress.", "Já existe uma publicação em andamento."))?;
     if !valid_release(&release) {
-        return Err("Versão do site inválida.".into());
+        return Err(tr("Invalid site release.", "Versão do site inválida.").into());
     }
     let config = load_config(&state)?;
     let sdk = sdk_config(&state, &config).await?;
@@ -191,7 +192,7 @@ pub async fn restore_site_release(
     if active_release(&stack) == Some(&release) {
         return site_details(&stack);
     }
-    let bucket = stack_output(&stack, "Bucket").ok_or("Bucket de publicação indisponível.")?;
+    let bucket = stack_output(&stack, "Bucket").ok_or(tr("The publishing bucket is unavailable.", "Bucket de publicação indisponível."))?;
     let s3 = s3_client(&sdk);
     for key in [
         format!("{HISTORY_PREFIX}{release}"),
@@ -202,7 +203,7 @@ pub async fn restore_site_release(
             .key(key)
             .send()
             .await
-            .map_err(|error| aws_error("verificar os arquivos da versão", error.code()))?;
+            .map_err(|error| aws_error(tr("verify the release files", "verificar os arquivos da versão"), error.code()))?;
     }
     site_details(&activate_release(&client, &stack, &release).await?)
 }
@@ -216,7 +217,7 @@ async fn create_or_resume_site(
     if let Some(stack) = find_stack(client, &name).await? {
         ensure_writable(&stack)?;
         if active_release(&stack).is_some() {
-            return Err("Já existe um site com esse bucket. Selecione o site para republicar ou escolha outro nome.".into());
+            return Err(tr("A site already uses this bucket. Select the site to republish it or choose another name.", "Já existe um site com esse bucket. Selecione o site para republicar ou escolha outro nome.").into());
         }
         return Ok(stack);
     }
@@ -225,15 +226,15 @@ async fn create_or_resume_site(
             if error
                 .raw_response()
                 .is_some_and(|response| response.status().as_u16() == 404) => {}
-        Ok(_) => return Err("Esse nome de bucket já está em uso. Escolha outro nome.".into()),
+        Ok(_) => return Err(tr("This bucket name is already in use. Choose another name.", "Esse nome de bucket já está em uso. Escolha outro nome.").into()),
         Err(error)
             if error
                 .raw_response()
                 .is_some_and(|response| matches!(response.status().as_u16(), 301 | 400 | 403)) =>
         {
-            return Err("O nome do bucket está em uso ou a AWS impediu a verificação. Tente outro nome ou confira suas permissões.".into());
+            return Err(tr("The bucket name is in use or AWS blocked the check. Try another name or check your permissions.", "O nome do bucket está em uso ou a AWS impediu a verificação. Tente outro nome ou confira suas permissões.").into());
         }
-        Err(error) => return Err(aws_error("verificar o nome do bucket", error.code())),
+        Err(error) => return Err(aws_error(tr("check the bucket name", "verificar o nome do bucket"), error.code())),
     }
     let created = client
         .create_stack()
@@ -248,17 +249,17 @@ async fn create_or_resume_site(
         .tags(Tag::builder().key(STACK_TAG).value("1").build())
         .send()
         .await
-        .map_err(|error| aws_error("criar a infraestrutura do site", error.code()))?;
+        .map_err(|error| aws_error(tr("create the site infrastructure", "criar a infraestrutura do site"), error.code()))?;
     let id = created
         .stack_id()
-        .ok_or("Identificador do site indisponível.")?;
+        .ok_or(tr("Site identifier unavailable.", "Identificador do site indisponível."))?;
     wait_for_stack(client, id, None).await
 }
 
 async fn activate_release(client: &Client, stack: &Stack, release: &str) -> Result<Stack, String> {
     let id = stack
         .stack_id()
-        .ok_or("Identificador do site indisponível.")?;
+        .ok_or(tr("Site identifier unavailable.", "Identificador do site indisponível."))?;
     let mut update = client
         .update_stack()
         .stack_name(id)
@@ -284,7 +285,7 @@ async fn activate_release(client: &Client, stack: &Stack, release: &str) -> Resu
     update
         .send()
         .await
-        .map_err(|error| aws_error("ativar a versão do site", error.code()))?;
+        .map_err(|error| aws_error(tr("activate the site release", "ativar a versão do site"), error.code()))?;
     wait_for_stack(client, id, Some((stack, release))).await
 }
 
@@ -300,7 +301,7 @@ async fn mark_release(s3: &aws_sdk_s3::Client, bucket: &str, release: &str) -> R
     {
         Ok(_) => Ok(()),
         Err(error) if error.code() == Some("PreconditionFailed") => Ok(()),
-        Err(error) => Err(aws_error("registrar a versão do site", error.code())),
+        Err(error) => Err(aws_error(tr("register the site release", "registrar a versão do site"), error.code())),
     }
 }
 
@@ -352,10 +353,10 @@ fn site_details(stack: &Stack) -> Result<PublishedSite, String> {
     Ok(PublishedSite {
         id: stack
             .stack_id()
-            .ok_or("Identificador do site indisponível.")?
+            .ok_or(tr("Site identifier unavailable.", "Identificador do site indisponível."))?
             .to_owned(),
         bucket: stack_output(stack, "Bucket")
-            .ok_or("Bucket de publicação indisponível.")?
+            .ok_or(tr("The publishing bucket is unavailable.", "Bucket de publicação indisponível."))?
             .to_owned(),
         url: stack_output(stack, "SiteUrl").map(str::to_owned),
     })
@@ -369,17 +370,17 @@ async fn require_site(client: &Client, id: &str) -> Result<Stack, String> {
         .and_then(|(_, resource)| resource.split_once('/'))
         .map(|(name, _)| name);
     if !name.is_some_and(is_site_name) {
-        return Err("Site inválido.".into());
+        return Err(tr("Invalid site.", "Site inválido.").into());
     }
     find_stack(client, id)
         .await?
-        .ok_or_else(|| "Site indisponível na conta e região configuradas.".into())
+        .ok_or_else(|| tr("The site is unavailable in the configured account and region.", "Site indisponível na conta e região configuradas.").into())
 }
 
 fn ensure_writable(stack: &Stack) -> Result<(), String> {
     match stack.stack_status() {
         Some(StackStatus::CreateComplete | StackStatus::UpdateComplete | StackStatus::UpdateRollbackComplete) => Ok(()),
-        Some(status) if status.as_str().ends_with("_IN_PROGRESS") => Err("A AWS está processando uma alteração no site. Tente novamente quando a operação terminar.".into()),
+        Some(status) if status.as_str().ends_with("_IN_PROGRESS") => Err(tr("AWS is processing a site change. Try again when the operation finishes.", "A AWS está processando uma alteração no site. Tente novamente quando a operação terminar.").into()),
         _ => Err(stack_failure(stack)),
     }
 }
@@ -388,7 +389,7 @@ fn load_config(state: &AppState) -> Result<AppConfig, String> {
     state
         .config_parser
         .load()
-        .map_err(|_| "Salve a configuração AWS primeiro.".into())
+        .map_err(|_| tr("Save your AWS settings first.", "Salve a configuração AWS primeiro.").into())
 }
 
 fn s3_client(sdk: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
@@ -402,14 +403,14 @@ async fn sdk_config(
     config: &crate::models::AppConfig,
 ) -> Result<aws_config::SdkConfig, String> {
     if config.aws_region.trim().is_empty() {
-        return Err("Configure a região AWS antes de publicar.".into());
+        return Err(tr("Set the AWS region before publishing.", "Configure a região AWS antes de publicar.").into());
     }
     if config
         .endpoint_url
         .as_deref()
         .is_some_and(|url| !url.trim().is_empty())
     {
-        return Err("A publicação requer uma conexão direta com a AWS.".into());
+        return Err(tr("Publishing requires a direct AWS connection.", "A publicação requer uma conexão direta com a AWS.").into());
     }
     let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(config.aws_region.trim().to_owned()));
@@ -422,8 +423,8 @@ async fn sdk_config(
         } = state
             .creds_manager
             .load()
-            .map_err(|_| "Não foi possível acessar as credenciais AWS.")?
-            .ok_or("Configure as credenciais AWS antes de publicar.")?;
+            .map_err(|_| tr("Could not access AWS credentials.", "Não foi possível acessar as credenciais AWS."))?
+            .ok_or(tr("Configure AWS credentials before publishing.", "Configure as credenciais AWS antes de publicar."))?;
         loader = loader.credentials_provider(Credentials::new(
             access_key_id,
             secret_access_key,
@@ -455,7 +456,7 @@ async fn describe_stack(client: &Client, name: &str) -> Result<Option<Stack>, St
         }
         Err(error) => {
             return Err(aws_error(
-                "consultar o site no CloudFormation",
+                tr("look up the site in CloudFormation", "consultar o site no CloudFormation"),
                 error.code(),
             ))
         }
@@ -466,7 +467,7 @@ async fn describe_stack(client: &Client, name: &str) -> Result<Option<Stack>, St
 async fn find_stack(client: &Client, name: &str) -> Result<Option<Stack>, String> {
     let stack = describe_stack(client, name).await?;
     if stack.as_ref().is_some_and(|stack| !is_managed(stack)) {
-        return Err("A pilha selecionada não pertence ao Amazon S3 Drive.".into());
+        return Err(tr("The selected stack does not belong to Amazon S3 Drive.", "A pilha selecionada não pertence ao Amazon S3 Drive.").into());
     }
     Ok(stack)
 }
@@ -501,7 +502,7 @@ async fn wait_for_stack(
         }
     })
     .await
-    .map_err(|_| "A AWS ainda pode estar processando a publicação. Consulte o estado do site antes de tentar novamente.")?
+    .map_err(|_| tr("AWS may still be publishing. Check the site status before trying again.", "A AWS ainda pode estar processando a publicação. Consulte o estado do site antes de tentar novamente."))?
 }
 
 fn stack_output<'a>(stack: &'a Stack, key: &str) -> Option<&'a str> {
@@ -516,17 +517,17 @@ fn stack_failure(stack: &Stack) -> String {
     let status = stack
         .stack_status()
         .map(|status| status.as_str())
-        .unwrap_or("desconhecido");
-    format!(
-        "A pilha {} está em {status}. Consulte os eventos no CloudFormation.",
-        stack.stack_name().unwrap_or("do site")
+        .unwrap_or(tr("unknown", "desconhecido"));
+    crate::language::localized_format!(
+        "Stack {} is in {status}. Check the events in CloudFormation.", "A pilha {} está em {status}. Consulte os eventos no CloudFormation.",
+        stack.stack_name().unwrap_or(tr("(site)", "do site"))
     )
 }
 
 fn aws_error(action: &str, code: Option<&str>) -> String {
-    format!(
-        "Não foi possível {action} ({}). Verifique a conexão e as permissões AWS.",
-        code.unwrap_or("sem resposta da AWS")
+    crate::language::localized_format!(
+        "Could not {action} ({}). Check the connection and AWS permissions.", "Não foi possível {action} ({}). Verifique a conexão e as permissões AWS.",
+        code.unwrap_or(tr("no response from AWS", "sem resposta da AWS"))
     )
 }
 

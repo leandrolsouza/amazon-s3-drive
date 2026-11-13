@@ -1,3 +1,4 @@
+use crate::language::tr;
 use crate::models::AwsCredentials;
 use aws_credential_types::Credentials;
 use aws_sdk_costexplorer::types::{
@@ -80,12 +81,12 @@ pub async fn public_prices(region: &str, storage_class: &str) -> Result<PublicPr
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
     {
-        return Err("Região AWS inválida.".into());
+        return Err(tr("Invalid AWS region.", "Região AWS inválida.").into());
     }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|_| "Não foi possível iniciar a consulta de tarifas.")?;
+        .map_err(|_| tr("Could not start the rate lookup.", "Não foi possível iniciar a consulta de tarifas."))?;
     let (s3, data_transfer) = tokio::try_join!(
         load_offer(&client, "AmazonS3", region),
         load_offer(&client, "AWSDataTransfer", region),
@@ -125,11 +126,11 @@ async fn load_offer(
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|_| "Catálogo de tarifas da AWS indisponível.")?;
+        .map_err(|_| tr("The AWS price list is unavailable.", "Catálogo de tarifas da AWS indisponível."))?;
     response
         .json()
         .await
-        .map_err(|_| "Catálogo de tarifas da AWS inválido.".into())
+        .map_err(|_| tr("The AWS price list is invalid.", "Catálogo de tarifas da AWS inválido.").into())
 }
 
 #[derive(Serialize)]
@@ -167,13 +168,13 @@ pub async fn monthly_spend(creds: Option<AwsCredentials>) -> Result<MonthlySpend
     let start = now.date_naive().with_day(1).unwrap().to_string();
     let end = now.date_naive().succ_opt().unwrap().to_string();
     let result = client.get_cost_and_usage()
-        .time_period(DateInterval::builder().start(&start).end(&end).build().map_err(|_| "Período inválido.")?)
+        .time_period(DateInterval::builder().start(&start).end(&end).build().map_err(|_| tr("Invalid date range.", "Período inválido."))?)
         .granularity(Granularity::Monthly)
         .metrics("UnblendedCost")
         .filter(Expression::builder().dimensions(DimensionValues::builder()
             .key(Dimension::Service).values("Amazon Simple Storage Service").build()).build())
         .group_by(GroupDefinition::builder().r#type(GroupDefinitionType::Dimension).key("USAGE_TYPE").build())
-        .send().await.map_err(|_| "Não foi possível consultar o Cost Explorer. Confira se ele está ativo e se suas credenciais têm a permissão ce:GetCostAndUsage.")?;
+        .send().await.map_err(|_| tr("Could not query Cost Explorer. Check that it is enabled and that your credentials have the ce:GetCostAndUsage permission.", "Não foi possível consultar o Cost Explorer. Confira se ele está ativo e se suas credenciais têm a permissão ce:GetCostAndUsage."))?;
     let mut rows = Vec::new();
     for period in result.results_by_time() {
         for group in period.groups() {
@@ -187,7 +188,7 @@ pub async fn monthly_spend(creds: Option<AwsCredentials>) -> Result<MonthlySpend
                 .and_then(|value| value.amount())
                 .and_then(|amount| amount.parse::<f64>().ok())
                 .ok_or(
-                    "O Cost Explorer retornou um valor sem unidade USD ou em formato inválido.",
+                    tr("Cost Explorer returned an amount with a missing USD unit or an invalid format.", "O Cost Explorer retornou um valor sem unidade USD ou em formato inválido."),
                 )?;
             rows.push(UsageCost {
                 usage_type: usage_type.clone(),

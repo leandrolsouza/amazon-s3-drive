@@ -1,3 +1,4 @@
+use crate::language::tr;
 use crate::models::{FileStatus, GlobalSyncState, SyncState};
 use crate::network_detector::NetworkDetector;
 use chrono::Utc;
@@ -70,8 +71,8 @@ impl StatusMonitor {
 
         if changed {
             match state {
-                SyncState::Synced => self.write_log("INFO", "SyncEngine", key, "Transferência concluída (Synced)"),
-                SyncState::Syncing => self.write_log("INFO", "SyncEngine", key, "Transferência iniciada (Syncing)"),
+                SyncState::Synced => self.write_log("INFO", "SyncEngine", key, tr("Transfer complete (Synced)", "Transferência concluída (Synced)")),
+                SyncState::Syncing => self.write_log("INFO", "SyncEngine", key, tr("Transfer started (Syncing)", "Transferência iniciada (Syncing)")),
                 SyncState::Pending => {}
                 SyncState::Error(_) => {}
             }

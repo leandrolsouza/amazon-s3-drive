@@ -1,3 +1,4 @@
+use crate::language::tr;
 use crate::{start_engine, AppState};
 use std::{sync::Arc, time::Duration};
 use tauri::{
@@ -45,13 +46,13 @@ pub(crate) async fn install_app_update(
     let _installation = state
         .update_installation
         .try_lock()
-        .map_err(|_| "Já existe uma atualização em andamento.")?;
+        .map_err(|_| tr("An update is already in progress.", "Já existe uma atualização em andamento."))?;
     let mut update = available_update(&app)
         .await?
         .filter(|update| update.version == version)
-        .ok_or("A versão anunciada mudou. Abra o aplicativo novamente para verificar.")?;
+        .ok_or(tr("The advertised version changed. Reopen the app to check for updates.", "A versão anunciada mudou. Abra o aplicativo novamente para verificar."))?;
     if update.download_url.scheme() != "https" {
-        return Err("O pacote de atualização deve ser baixado via HTTPS.".into());
+        return Err(tr("The update package must be downloaded over HTTPS.", "O pacote de atualização deve ser baixado via HTTPS.").into());
     }
     update.timeout = Some(Duration::from_secs(300));
     let bytes = update
@@ -80,14 +81,14 @@ pub(crate) async fn install_app_update(
             if let Err(err) =
                 start_engine(&state.sync_engine, &state.creds_manager, config, &state.db).await
             {
-                error.push_str(&format!(" Falha ao retomar o bucket principal: {err}"));
+                error.push_str(&crate::language::localized_format!(" Could not resume the primary bucket: {err}", " Falha ao retomar o bucket principal: {err}"));
             }
         }
         if let Err(err) = state.buckets.restore_enabled(
             Arc::clone(&state.config_parser),
             Arc::clone(&state.creds_manager),
         ) {
-            error.push_str(&format!(" Falha ao retomar os buckets adicionais: {err}"));
+            error.push_str(&crate::language::localized_format!(" Could not resume the additional buckets: {err}", " Falha ao retomar os buckets adicionais: {err}"));
         }
         return Err(error);
     }

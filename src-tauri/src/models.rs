@@ -454,7 +454,7 @@ pub enum ConflictError {
 pub enum S3Error {
     #[error("Objeto S3 inexistente")]
     ObjectNotFound,
-    #[error("A revisão do objeto S3 mudou")]
+    #[error("{}", crate::language::tr("The S3 object revision changed", "A revisão do objeto S3 mudou"))]
     PreconditionFailed,
     #[error("AWS S3 SDK error: {0}")]
     Sdk(String),

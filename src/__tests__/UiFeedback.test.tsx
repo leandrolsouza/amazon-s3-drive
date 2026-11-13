@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { App } from "../App";
+import { initializeLocale } from "../i18n";
 import { LogsView } from "../pages/LogsView";
 import { useSyncStore } from "../store";
 import { syncPresentation } from "../syncPresentation";
@@ -196,5 +197,30 @@ describe("Startup and draft navigation", () => {
     expect(screen.getByLabelText("Nome do Bucket S3")).toHaveValue("draft-bucket");
     expect(screen.getByText("Alterações não salvas")).toBeVisible();
     expect(useSyncStore.getState().config).toEqual(config);
+  });
+});
+
+describe("Language preference", () => {
+  it("defaults to English and switches the interface to Portuguese after saving", async () => {
+    initializeLocale(undefined);
+    useSyncStore.getState().resetStore();
+    vi.mocked(invoke).mockReset().mockResolvedValue(null);
+
+    try {
+      render(<App />);
+      expect(document.documentElement).toHaveAttribute("lang", "en-US");
+      expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+      const selector = screen.getByRole("combobox", { name: "Language" });
+      expect(selector).toHaveValue("en-US");
+
+      fireEvent.change(selector, { target: { value: "pt-BR" } });
+
+      await screen.findByRole("button", { name: "Configurações" });
+      expect(invoke).toHaveBeenCalledWith("set_language", { language: "pt-BR" });
+      expect(document.documentElement).toHaveAttribute("lang", "pt-BR");
+      expect(screen.getByRole("combobox", { name: "Idioma" })).toHaveValue("pt-BR");
+    } finally {
+      initializeLocale("pt-BR");
+    }
   });
 });

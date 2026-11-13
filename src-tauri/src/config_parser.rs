@@ -1,10 +1,12 @@
+use crate::language::tr;
 use crate::models::{AppConfig, ConfigError, ValidationError};
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) const S3_ENDPOINT_ERROR: &str =
-    "Use um endpoint S3 HTTPS. HTTP só é permitido para endereços IP de loopback, como 127.0.0.1.";
+pub(crate) fn s3_endpoint_error() -> &'static str {
+    tr("Use an HTTPS S3 endpoint. HTTP is allowed only for loopback IP addresses such as 127.0.0.1.", "Use um endpoint S3 HTTPS. HTTP só é permitido para endereços IP de loopback, como 127.0.0.1.")
+}
 
 pub(crate) fn parse_s3_endpoint(endpoint: Option<&str>) -> Result<Option<reqwest::Url>, ()> {
     let Some(endpoint) = endpoint.map(str::trim).filter(|url| !url.is_empty()) else {
@@ -96,14 +98,14 @@ impl ConfigParser {
         if bucket_trimmed.is_empty() {
             errors.push(ValidationError {
                 field: "bucket_name".to_string(),
-                reason: "O nome do bucket S3 é obrigatório.".to_string(),
+                reason: tr("The S3 bucket name is required.", "O nome do bucket S3 é obrigatório.").to_string(),
             });
         } else {
             let bucket_re = Regex::new(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$").unwrap();
             if !bucket_re.is_match(bucket_trimmed) {
                 errors.push(ValidationError {
                     field: "bucket_name".to_string(),
-                    reason: "Nome de bucket S3 inválido (deve ter 3 a 63 caracteres minúsculos, números, pontos ou hífens).".to_string(),
+                    reason: tr("Invalid S3 bucket name. Use 3 to 63 lowercase letters, numbers, periods, or hyphens.", "Nome de bucket S3 inválido (deve ter 3 a 63 caracteres minúsculos, números, pontos ou hífens).").to_string(),
                 });
             }
         }
@@ -111,7 +113,7 @@ impl ConfigParser {
         if config.local_path.trim().is_empty() {
             errors.push(ValidationError {
                 field: "local_path".to_string(),
-                reason: "O caminho da pasta local é obrigatório.".to_string(),
+                reason: tr("The local folder path is required.", "O caminho da pasta local é obrigatório.").to_string(),
             });
         }
 
@@ -125,14 +127,14 @@ impl ConfigParser {
         if region_trimmed.is_empty() {
             errors.push(ValidationError {
                 field: "aws_region".to_string(),
-                reason: "A região AWS é obrigatória.".to_string(),
+                reason: tr("The AWS region is required.", "A região AWS é obrigatória.").to_string(),
             });
         } else if !has_custom_endpoint || region_trimmed != "auto" {
             let region_re = Regex::new(r"^[a-z]{2}-[a-z]+-\d$").unwrap();
             if !region_re.is_match(region_trimmed) {
                 errors.push(ValidationError {
                     field: "aws_region".to_string(),
-                    reason: "Formato de região AWS inválido (ex: us-east-1, sa-east-1)."
+                    reason: tr("Invalid AWS region format (e.g. us-east-1, sa-east-1).", "Formato de região AWS inválido (ex: us-east-1, sa-east-1).")
                         .to_string(),
                 });
             }
@@ -141,14 +143,14 @@ impl ConfigParser {
         if parse_s3_endpoint(config.endpoint_url.as_deref()).is_err() {
             errors.push(ValidationError {
                 field: "endpoint_url".to_string(),
-                reason: S3_ENDPOINT_ERROR.into(),
+                reason: s3_endpoint_error().into(),
             });
         }
 
         if config.sync_interval_secs == 0 || config.sync_interval_secs > 60 {
             errors.push(ValidationError {
                 field: "sync_interval_secs".to_string(),
-                reason: "O intervalo de sincronização deve estar entre 1 e 60 segundos."
+                reason: tr("The sync interval must be between 1 and 60 seconds.", "O intervalo de sincronização deve estar entre 1 e 60 segundos.")
                     .to_string(),
             });
         }
@@ -158,7 +160,7 @@ impl ConfigParser {
             if let Err(e) = glob::Pattern::new(pattern) {
                 errors.push(ValidationError {
                     field: "exclusion_patterns".to_string(),
-                    reason: format!("Padrão glob inválido '{}': {}", pattern, e),
+                    reason: crate::language::localized_format!("Invalid glob pattern '{}': {}", "Padrão glob inválido '{}': {}", pattern, e),
                 });
             }
         }

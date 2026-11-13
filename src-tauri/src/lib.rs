@@ -1,7 +1,9 @@
+use crate::language::tr;
 mod buckets;
 pub mod config_parser;
 pub mod conflict_resolver;
 mod costs;
+mod language;
 pub mod credentials_manager;
 pub mod db;
 pub mod file_watcher;
@@ -101,7 +103,7 @@ fn apply_os_autostart(enabled: bool) {
 #[tauri::command]
 fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
     let _lifecycle = state.primary_lifecycle.try_lock()
-        .map_err(|_| "Aguarde a mudança de estado da sincronização.".to_string())?;
+        .map_err(|_| tr("Wait for the current sync state change to finish.", "Aguarde a mudança de estado da sincronização.").to_string())?;
     let _configuration = state.buckets.lock_configuration();
     if let Err(errs) = ConfigParser::validate(&config) {
         let msg = errs
@@ -117,14 +119,14 @@ fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), Stri
         && sync_engine::config_fingerprint(&config)
             != sync_engine::config_fingerprint(&state.sync_engine.get_config())
     {
-        return Err("Pause a sincronização principal antes de mudar seu destino ou pasta.".into());
+        return Err(tr("Pause the primary sync before changing its destination or folder.", "Pause a sincronização principal antes de mudar seu destino ou pasta.").into());
     }
 
     let local_dir = PathBuf::from(&config.local_path);
     if !local_dir.exists() {
         std::fs::create_dir_all(&local_dir).map_err(|e| {
-            format!(
-                "Caminho da pasta local inválido ou inacessível '{}': {}",
+            crate::language::localized_format!(
+                "Invalid or inaccessible local folder path '{}': {}", "Caminho da pasta local inválido ou inacessível '{}': {}",
                 config.local_path, e
             )
         })?;
@@ -168,7 +170,7 @@ async fn test_connection(state: State<'_, AppState>) -> Result<(), String> {
             .creds_manager
             .load()
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Credenciais AWS não configuradas.".to_string())?
+            .ok_or_else(|| tr("AWS credentials are not configured.", "Credenciais AWS não configuradas.").to_string())?
     };
     creds.region = config.aws_region.clone();
 
@@ -252,7 +254,7 @@ async fn sync_client(
         credentials
             .load()
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Credenciais AWS não configuradas.".to_string())?
+            .ok_or_else(|| tr("AWS credentials are not configured.", "Credenciais AWS não configuradas.").to_string())?
     };
 
     creds.region = config.aws_region.clone();
@@ -357,19 +359,19 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-$dlg.Description = "Selecione a pasta local para o Amazon S3 Drive"
+$dlg.Description = "__DIALOG_TITLE__"
 $dlg.ShowNewFolderButton = $true
 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dlg.SelectedPath
 }
-"#;
+"#.replace("__DIALOG_TITLE__", tr("Select the local folder for Amazon S3 Drive", "Selecione a pasta local para o Amazon S3 Drive"));
         let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Sta", "-Command", script])
+            .args(["-NoProfile", "-Sta", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|_| "Não foi possível abrir o seletor de pastas.")?;
+            .map_err(|_| tr("Could not open the folder picker.", "Não foi possível abrir o seletor de pastas."))?;
         if !output.status.success() {
-            return Err("Não foi possível abrir o seletor de pastas.".into());
+            return Err(tr("Could not open the folder picker.", "Não foi possível abrir o seletor de pastas.").into());
         }
         let selected = String::from_utf8_lossy(&output.stdout)
             .trim_end_matches(['\r', '\n'])
@@ -390,7 +392,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 fn open_local_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let configured = state.sync_engine.get_config().local_path;
     if configured.trim().is_empty() || path != configured {
-        return Err("O caminho deve ser a pasta de sincronização configurada.".into());
+        return Err(tr("The path must be the configured sync folder.", "O caminho deve ser a pasta de sincronização configurada.").into());
     }
     open_folder(Path::new(&configured))
 }
@@ -398,8 +400,8 @@ fn open_local_folder(path: String, state: State<'_, AppState>) -> Result<(), Str
 fn open_folder(p: &Path) -> Result<(), String> {
     if !p.exists() {
         std::fs::create_dir_all(&p).map_err(|e| {
-            format!(
-                "Não foi possível criar/abrir a pasta '{}': {}",
+            crate::language::localized_format!(
+                "Could not create or open folder '{}': {}", "Não foi possível criar/abrir a pasta '{}': {}",
                 p.display(),
                 e
             )
@@ -437,8 +439,8 @@ fn open_file_in_os(s3_key: String, state: State<'_, AppState>) -> Result<(), Str
         .scoped_local_path(&s3_key, &cfg)
         .map_err(|err| err.to_string())?;
     if !local_path.exists() {
-        return Err(format!(
-            "O arquivo local ainda não existe em '{}'.",
+        return Err(crate::language::localized_format!(
+            "The local file does not yet exist at '{}'.", "O arquivo local ainda não existe em '{}'.",
             local_path.display()
         ));
     }
@@ -549,14 +551,14 @@ fn open_files_dialog() -> Result<Vec<String>, String> {
         let script = r#"
 Add-Type -AssemblyName System.Windows.Forms
 $dlg = New-Object System.Windows.Forms.OpenFileDialog
-$dlg.Title = "Selecione arquivo(s) para importar no Amazon S3 Drive"
+$dlg.Title = "__DIALOG_TITLE__"
 $dlg.Multiselect = $true
 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     $dlg.FileNames | ForEach-Object { Write-Output $_ }
 }
-"#;
+"#.replace("__DIALOG_TITLE__", tr("Select files to import into Amazon S3 Drive", "Selecione arquivo(s) para importar no Amazon S3 Drive"));
         if let Ok(output) = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Sta", "-Command", script])
+            .args(["-NoProfile", "-Sta", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
@@ -653,15 +655,15 @@ fn export_config_profile(state: State<'_, AppState>) -> Result<Option<String>, S
         let script = r#"
 Add-Type -AssemblyName System.Windows.Forms
 $dlg = New-Object System.Windows.Forms.SaveFileDialog
-$dlg.Title = "Exportar Perfil de Configuração do Amazon S3 Drive"
-$dlg.Filter = "JSON Profile (*.json)|*.json"
+$dlg.Title = "__DIALOG_TITLE__"
+$dlg.Filter = "__DIALOG_FILTER__"
 $dlg.FileName = "s3-drive-profile.json"
 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dlg.FileName
 }
-"#;
+"#.replace("__DIALOG_TITLE__", tr("Export Amazon S3 Drive Configuration Profile", "Exportar Perfil de Configuração do Amazon S3 Drive")).replace("__DIALOG_FILTER__", tr("JSON Profile (*.json)|*.json", "Perfil JSON (*.json)|*.json"));
         if let Ok(output) = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Sta", "-Command", script])
+            .args(["-NoProfile", "-Sta", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
@@ -690,14 +692,14 @@ fn import_config_profile() -> Result<Option<AppConfig>, String> {
         let script = r#"
 Add-Type -AssemblyName System.Windows.Forms
 $dlg = New-Object System.Windows.Forms.OpenFileDialog
-$dlg.Title = "Importar Perfil de Configuração do Amazon S3 Drive"
-$dlg.Filter = "JSON Profile (*.json)|*.json"
+$dlg.Title = "__DIALOG_TITLE__"
+$dlg.Filter = "__DIALOG_FILTER__"
 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dlg.FileName
 }
-"#;
+"#.replace("__DIALOG_TITLE__", tr("Import Amazon S3 Drive Configuration Profile", "Importar Perfil de Configuração do Amazon S3 Drive")).replace("__DIALOG_FILTER__", tr("JSON Profile (*.json)|*.json", "Perfil JSON (*.json)|*.json"));
         if let Ok(output) = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Sta", "-Command", script])
+            .args(["-NoProfile", "-Sta", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
@@ -707,7 +709,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             }
             let raw = std::fs::read_to_string(&source).map_err(|e| e.to_string())?;
             let mut imported: AppConfig =
-                serde_json::from_str(&raw).map_err(|e| format!("JSON inválido: {}", e))?;
+                serde_json::from_str(&raw).map_err(|e| crate::language::localized_format!("Invalid JSON: {}", "JSON inválido: {}", e))?;
             imported.notifications.error_enabled = true;
             ConfigParser::validate(&imported).map_err(|errors| {
                 errors
@@ -781,7 +783,7 @@ fn get_storage_analytics(state: State<'_, AppState>) -> Result<StorageAnalytics,
 async fn get_s3_public_prices(state: State<'_, AppState>) -> Result<costs::PublicPrices, String> {
     let config = state.sync_engine.get_config();
     if config.endpoint_url.as_deref().is_some_and(|url| !url.trim().is_empty()) {
-        return Err("Tarifas AWS indisponíveis para endpoints personalizados.".into());
+        return Err(tr("AWS rates are unavailable for custom endpoints.", "Tarifas AWS indisponíveis para endpoints personalizados.").into());
     }
     costs::public_prices(&config.aws_region, &config.storage_class).await
 }
@@ -790,7 +792,7 @@ async fn get_s3_public_prices(state: State<'_, AppState>) -> Result<costs::Publi
 async fn get_s3_monthly_spend(state: State<'_, AppState>) -> Result<costs::MonthlySpend, String> {
     let config = state.sync_engine.get_config();
     if config.endpoint_url.as_deref().is_some_and(|url| !url.trim().is_empty()) {
-        return Err("Faturamento AWS indisponível para endpoints personalizados.".into());
+        return Err(tr("AWS billing is unavailable for custom endpoints.", "Faturamento AWS indisponível para endpoints personalizados.").into());
     }
     let creds = if config.use_iam_role {
         None
@@ -799,8 +801,8 @@ async fn get_s3_monthly_spend(state: State<'_, AppState>) -> Result<costs::Month
             state
                 .creds_manager
                 .load()
-                .map_err(|_| "Credenciais AWS indisponíveis.")?
-                .ok_or("Credenciais AWS não configuradas.")?,
+                .map_err(|_| tr("AWS credentials are unavailable.", "Credenciais AWS indisponíveis."))?
+                .ok_or(tr("AWS credentials are not configured.", "Credenciais AWS não configuradas."))?,
         )
     };
     costs::monthly_spend(creds).await
@@ -845,6 +847,7 @@ pub fn run() {
                 emitter,
             ));
 
+            language::load();
             let _ = tray::setup_system_tray(app.handle(), status_monitor);
 
             let buckets = Arc::new(buckets::BucketCatalog::new(db.clone(), app_dir)?);
@@ -863,6 +866,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            language::get_language,
+            language::set_language,
             updater::check_app_update,
             updater::install_app_update,
             get_config,

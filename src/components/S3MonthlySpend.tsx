@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { t, locale } from "../i18n";
 
 interface MonthlySpend {
   fetched_at: string;
@@ -10,9 +11,8 @@ interface MonthlySpend {
   rows: { usage_type: string; usd: number }[];
 }
 
-const usd = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "USD", maximumFractionDigits: 4 });
-
 export function S3MonthlySpend() {
+  const usd = new Intl.NumberFormat(locale, { style: "currency", currency: "USD", maximumFractionDigits: 4 });
   const [spend, setSpend] = useState<MonthlySpend | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -23,7 +23,7 @@ export function S3MonthlySpend() {
     try {
       setSpend(await invoke<MonthlySpend>("get_s3_monthly_spend"));
     } catch (failure) {
-      setError(typeof failure === "string" ? failure : "Não foi possível consultar o Cost Explorer.");
+      setError(typeof failure === "string" ? failure : t("Could not query Cost Explorer."));
     } finally {
       setBusy(false);
     }
@@ -31,24 +31,24 @@ export function S3MonthlySpend() {
 
   return (
     <section className="analytics-breakdown cost-forecast" aria-labelledby="monthly-spend-title">
-      <h3 id="monthly-spend-title">Gasto do mês na AWS</h3>
+      <h3 id="monthly-spend-title">{t("AWS spend this month")}</h3>
       <button type="button" className="btn-compact" onClick={fetchSpend} disabled={busy}>
-        {busy ? "Consultando…" : "Consultar gasto do mês"}
+        {busy ? t("Loading…") : t("Check this month's spend")}
       </button>
-      <p>Consulta ao Cost Explorer de US$ 0,01 por página. Os valores de S3 podem incluir outros buckets e contas visíveis à credencial.</p>
+      <p>{t("Cost Explorer charges $0.01 per page. S3 charges may include other buckets and accounts accessible to these credentials.")}</p>
       {error && <p role="alert">{error}</p>}
       {spend && (
         <>
-          <p>Consultado em {new Date(spend.fetched_at).toLocaleString("pt-BR")}. Período UTC de {spend.start} até {spend.end_exclusive} (exclusivo).</p>
+          <p>{t("Retrieved on") + " "}{new Date(spend.fetched_at).toLocaleString(locale)}{t(". UTC period from") + " "}{spend.start} {t("to") + " "}{spend.end_exclusive} {t("(exclusive).")}</p>
           <dl className="cost-forecast-totals" aria-live="polite">
             <div className="cost-forecast-total">
-              <dt>{spend.partial ? "Subtotal da primeira página" : spend.estimated ? "Gasto registrado (estimado pela AWS)" : "Gasto registrado"}</dt>
+              <dt>{spend.partial ? t("First-page subtotal") : spend.estimated ? t("Recorded spend (AWS estimate)") : t("Recorded spend")}</dt>
               <dd>{usd.format(spend.rows.reduce((total, row) => total + row.usd, 0))}</dd>
             </div>
           </dl>
           {spend.rows.length > 0 && (
             <details className="cost-forecast-breakdown">
-              <summary>Detalhar por tipo de uso</summary>
+              <summary>{t("Break down by usage type")}</summary>
               <dl>
                 {spend.rows.map((row) => (
                   <div key={row.usage_type}><dt>{row.usage_type}</dt><dd>{usd.format(row.usd)}</dd></div>

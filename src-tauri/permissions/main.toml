@@ -3,6 +3,8 @@ identifier = "allow-main-commands"
 description = "Commands used by the local desktop interface."
 commands.allow = [
   "get_config",
+  "get_language",
+  "set_language",
   "check_app_update",
   "install_app_update",
   "save_config",

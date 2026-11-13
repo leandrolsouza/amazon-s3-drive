@@ -1,4 +1,5 @@
-use crate::config_parser::{parse_s3_endpoint, S3_ENDPOINT_ERROR};
+use crate::language::tr;
+use crate::config_parser::{parse_s3_endpoint, s3_endpoint_error};
 use crate::conflict_resolver::ConflictResolver;
 use crate::db::Database;
 use crate::file_watcher::FileWatcher;
@@ -151,7 +152,7 @@ fn require_local_path(path: &Path, base: &Path) -> Result<(), SyncError> {
         Ok(())
     } else {
         Err(SyncError::Io(
-            "Caminho fora da pasta de sincronização ou com redirecionamento.".into(),
+            tr("The path is outside the sync folder or redirects elsewhere.", "Caminho fora da pasta de sincronização ou com redirecionamento.").into(),
         ))
     }
 }
@@ -165,7 +166,7 @@ fn scoped_key<'a>(key: &'a str, cfg: &AppConfig) -> Result<&'a str, SyncError> {
             .and_then(|suffix| suffix.strip_prefix('/'))
     };
     relative.filter(|key| !key.is_empty()).ok_or_else(|| {
-        SyncError::Config("A chave S3 deve pertencer ao prefixo de sincronização.".into())
+        SyncError::Config(tr("The S3 key must be within the sync prefix.", "A chave S3 deve pertencer ao prefixo de sincronização.").into())
     })
 }
 
@@ -187,7 +188,7 @@ fn safe_relative_path(relative: &str, base: &Path) -> Result<PathBuf, SyncError>
                     || part.ends_with(['.', ' '])
                     || windows_device_name(part)))
         {
-            return Err(SyncError::Io("Chave ou caminho local inválido.".into()));
+            return Err(SyncError::Io(tr("Invalid key or local path.", "Chave ou caminho local inválido.").into()));
         }
         path.push(part);
     }
@@ -368,7 +369,7 @@ impl SyncEngine {
         let config = self.config.read().unwrap();
         let client = self.s3_client.read().unwrap().clone().ok_or_else(|| {
             SyncError::Credentials(
-                "Cliente S3 não inicializado. Inicie a sincronização primeiro.".into(),
+                tr("The S3 client has not been initialized. Start sync first.", "Cliente S3 não inicializado. Inicie a sincronização primeiro.").into(),
             )
         })?;
         Ok((config.clone(), client))
@@ -408,12 +409,12 @@ impl SyncEngine {
         let cfg = self.get_config();
         if cfg.local_path.trim().is_empty() {
             return Err(SyncError::Config(
-                "Caminho da pasta local não configurado.".to_string(),
+                tr("The local folder path is not configured.", "Caminho da pasta local não configurado.").to_string(),
             ));
         }
 
         let endpoint = parse_s3_endpoint(cfg.endpoint_url.as_deref())
-            .map_err(|_| SyncError::Config(S3_ENDPOINT_ERROR.into()))?;
+            .map_err(|_| SyncError::Config(s3_endpoint_error().into()))?;
         let local_dir = PathBuf::from(&cfg.local_path);
         if self.db.get_config_fingerprint().ok().flatten().as_deref()
             == Some(config_fingerprint(&cfg).as_str())
@@ -424,13 +425,13 @@ impl SyncEngine {
                 .is_empty()
         {
             fs::read_dir(&local_dir).map_err(|_| SyncError::Io(
-                "A pasta sincronizada está indisponível. Reconecte o disco ou restaure a pasta antes de sincronizar.".into()
+                tr("The synced folder is unavailable. Reconnect the drive or restore the folder before syncing.", "A pasta sincronizada está indisponível. Reconecte o disco ou restaure a pasta antes de sincronizar.").into()
             ))?;
         }
         // Requisito 1.1 e 1.6: criar Pasta_Local se não existir; falhar se inválida/inacessível
         fs::create_dir_all(&local_dir).map_err(|e| {
-            SyncError::Io(format!(
-                "Não foi possível criar ou acessar a pasta local '{}': {}",
+            SyncError::Io(crate::language::localized_format!(
+                "Could not create or access local folder '{}': {}", "Não foi possível criar ou acessar a pasta local '{}': {}",
                 local_dir.display(),
                 e
             ))
@@ -443,15 +444,15 @@ impl SyncEngine {
         if let Some(client) = client_opt {
             client.test_prefix_access(cfg.s3_prefix.as_deref()).await.map_err(|e| {
                 self.emit_void("credentials:invalid");
-                SyncError::Credentials(format!(
-                    "Falha ao acessar o bucket S3 '{}': {}",
+                SyncError::Credentials(crate::language::localized_format!(
+                    "Could not access S3 bucket '{}': {}", "Falha ao acessar o bucket S3 '{}': {}",
                     cfg.bucket_name, e
                 ))
             })?;
             self.network_detector.set_online(true);
         } else {
             return Err(SyncError::Credentials(
-                "Cliente S3 / credenciais não configurados.".to_string(),
+                tr("The S3 client or credentials are not configured.", "Cliente S3 / credenciais não configurados.").to_string(),
             ));
         }
 
@@ -1017,7 +1018,7 @@ impl SyncEngine {
                                 .map_err(|e| SyncError::Io(e.to_string()))?;
                             let name = local_path
                                 .file_name()
-                                .ok_or_else(|| SyncError::Io("Nome inválido.".into()))?;
+                                .ok_or_else(|| SyncError::Io(tr("Invalid name.", "Nome inválido.").into()))?;
                             let trash_path = trash_dir.join(name);
                             require_local_path(&trash_path, &base)?;
                             fs::rename(&local_path, trash_path)
@@ -1187,12 +1188,12 @@ impl SyncEngine {
         safe_relative_path(scoped_key(&op.s3_key, &cfg)?, base)?;
         if !path_within_sync_folder(Path::new(&op.local_path), base) {
             return Err(SyncError::Io(
-                "Caminho fora da pasta de sincronização.".into(),
+                tr("The path is outside the sync folder.", "Caminho fora da pasta de sincronização.").into(),
             ));
         }
         if op.extra.as_deref() != Some("deletion-review") && self.has_deletion_review(&op.s3_key)? {
             return Err(SyncError::Conflict(
-                "Exclusão aguardando sua decisão.".into(),
+                tr("Deletion is awaiting review.", "Exclusão aguardando sua decisão.").into(),
             ));
         }
         match op.operation_type {
@@ -1380,8 +1381,8 @@ impl SyncEngine {
                             Some(s3_client.upload_file(dst_key, &path).await?)
                         } else {
                             // Nem cópia nem upload possíveis — abortar sem excluir a origem
-                            return Err(SyncError::Io(format!(
-                                    "Falha ao renomear '{}': cópia S3 falhou e arquivo local '{}' não existe",
+                            return Err(SyncError::Io(crate::language::localized_format!(
+                                    "Could not rename '{}': the S3 copy failed and local file '{}' does not exist", "Falha ao renomear '{}': cópia S3 falhou e arquivo local '{}' não existe",
                                     op.s3_key, op.local_path
                                 )));
                         }
@@ -1390,8 +1391,8 @@ impl SyncEngine {
 
                 // Requisito 2.9: excluir a origem somente após destino confirmado
                 if let Err(e) = s3_client.delete_object(&op.s3_key).await {
-                    return Err(SyncError::S3(format!(
-                        "Objeto copiado para '{}', mas falha ao excluir original '{}': {}",
+                    return Err(SyncError::S3(crate::language::localized_format!(
+                        "Object copied to '{}', but the original '{}' could not be deleted: {}", "Objeto copiado para '{}', mas falha ao excluir original '{}': {}",
                         dst_key, op.s3_key, e
                     )));
                 }
@@ -1467,7 +1468,7 @@ impl SyncEngine {
         require_local_path(&path, base)?;
         if path == base {
             return Err(SyncError::Io(
-                "A chave S3 não identifica um arquivo ou subpasta.".into(),
+                tr("The S3 key does not identify a file or subfolder.", "A chave S3 não identifica um arquivo ou subpasta.").into(),
             ));
         }
         Ok(path)
@@ -1485,7 +1486,7 @@ impl SyncEngine {
             .get(local_path)
             .filter(|path| path.as_str() == conflict_path)
             .ok_or_else(|| {
-                SyncError::Conflict("Conflito não encontrado ou desatualizado.".into())
+                SyncError::Conflict(tr("The conflict was not found or is out of date.", "Conflito não encontrado ou desatualizado.").into())
             })?;
         let cfg = self.get_config();
         let base = Path::new(&cfg.local_path);
@@ -1503,7 +1504,7 @@ impl SyncEngine {
             "local" | "both" => {}
             _ => {
                 return Err(SyncError::Conflict(
-                    "Estratégia de resolução desconhecida.".into(),
+                    tr("Unknown resolution strategy.", "Estratégia de resolução desconhecida.").into(),
                 ))
             }
         }
@@ -1653,7 +1654,7 @@ impl SyncEngine {
         let base = PathBuf::from(&cfg.local_path);
         if cfg.local_path.trim().is_empty() {
             return Err(SyncError::Config(
-                "Pasta local não configurada.".to_string(),
+                tr("The local folder is not configured.", "Pasta local não configurada.").to_string(),
             ));
         }
 
@@ -1683,7 +1684,7 @@ impl SyncEngine {
             };
             let file_name = file_name
                 .to_str()
-                .ok_or_else(|| SyncError::Io("Nome de arquivo inválido.".into()))?;
+                .ok_or_else(|| SyncError::Io(tr("Invalid filename.", "Nome de arquivo inválido.").into()))?;
             let dest = safe_relative_path(file_name, &target_dir)?;
             require_local_path(&dest, &base)?;
             if src != dest {
@@ -1809,13 +1810,13 @@ impl SyncEngine {
     ) -> Result<String, SyncError> {
         let clean_name = folder_name.trim().trim_matches('/').trim_matches('\\');
         if clean_name.is_empty() || clean_name == "." || clean_name == ".." {
-            return Err(SyncError::Io("Nome de pasta inválido.".to_string()));
+            return Err(SyncError::Io(tr("Invalid folder name.", "Nome de pasta inválido.").to_string()));
         }
         let cfg = self.get_config();
         let base = PathBuf::from(&cfg.local_path);
         if cfg.local_path.trim().is_empty() {
             return Err(SyncError::Config(
-                "Pasta local não configurada.".to_string(),
+                tr("The local folder is not configured.", "Pasta local não configurada.").to_string(),
             ));
         }
 

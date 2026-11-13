@@ -1,3 +1,4 @@
+use crate::language::tr;
 use crate::models::GlobalSyncState;
 use crate::status_monitor::StatusMonitor;
 use std::sync::{
@@ -18,9 +19,9 @@ pub const MENU_QUIT_ID: &str = "quit";
 
 pub fn tray_tooltip_for_state(state: &GlobalSyncState) -> &'static str {
     match state {
-        GlobalSyncState::UpToDate => "Amazon S3 Drive — Em dia",
-        GlobalSyncState::Syncing => "Amazon S3 Drive — Sincronizando...",
-        GlobalSyncState::Error => "Amazon S3 Drive — Erro de sincronização",
+        GlobalSyncState::UpToDate => tr("Amazon S3 Drive — Up to date", "Amazon S3 Drive — Em dia"),
+        GlobalSyncState::Syncing => tr("Amazon S3 Drive — Syncing...", "Amazon S3 Drive — Sincronizando..."),
+        GlobalSyncState::Error => tr("Amazon S3 Drive — Sync error", "Amazon S3 Drive — Erro de sincronização"),
         GlobalSyncState::Offline => "Amazon S3 Drive — Offline",
     }
 }
@@ -41,10 +42,10 @@ pub fn setup_system_tray(
     app: &AppHandle,
     status_monitor: Arc<StatusMonitor>,
 ) -> Result<(), tauri::Error> {
-    let open_item = MenuItem::with_id(app, MENU_OPEN_DRIVE_ID, "Abrir S3 Drive", true, None::<&str>)?;
-    let settings_item = MenuItem::with_id(app, MENU_SETTINGS_ID, "Configurações", true, None::<&str>)?;
+    let open_item = MenuItem::with_id(app, MENU_OPEN_DRIVE_ID, tr("Open S3 Drive", "Abrir S3 Drive"), true, None::<&str>)?;
+    let settings_item = MenuItem::with_id(app, MENU_SETTINGS_ID, tr("Settings", "Configurações"), true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, MENU_QUIT_ID, "Sair", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, MENU_QUIT_ID, tr("Quit", "Sair"), true, None::<&str>)?;
 
     let menu = Menu::with_items(app, &[&open_item, &settings_item, &sep, &quit_item])?;
 
@@ -125,6 +126,14 @@ pub fn setup_system_tray(
             }
         }
     };
+
+    let update_tray = refresh_tray.clone();
+    app.listen("app:language-changed", move |_| {
+        let _ = open_item.set_text(tr("Open S3 Drive", "Abrir S3 Drive"));
+        let _ = settings_item.set_text(tr("Settings", "Configurações"));
+        let _ = quit_item.set_text(tr("Quit", "Sair"));
+        update_tray();
+    });
 
     let r1 = refresh_tray.clone();
     app.listen("sync:file-status-changed", move |_| r1());

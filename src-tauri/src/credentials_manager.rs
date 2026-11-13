@@ -1,3 +1,4 @@
+use crate::language::tr;
 use crate::models::{AwsCredentials, CredError, ValidationError};
 use crate::s3_client::S3Client;
 use regex::Regex;
@@ -15,14 +16,14 @@ impl CredentialsManager {
 
     fn entry() -> Result<keyring::Entry, CredError> {
         keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-            .map_err(|_| CredError::Keyring("Cofre de credenciais indisponível.".into()))
+            .map_err(|_| CredError::Keyring(tr("The system keyring is unavailable.", "Cofre de credenciais indisponível.").into()))
     }
 
     pub fn store(&self, creds: &AwsCredentials) -> Result<(), CredError> {
         let json =
             serde_json::to_string(creds).map_err(|e| CredError::Serialization(e.to_string()))?;
         Self::entry()?.set_password(&json).map_err(|_| {
-            CredError::Keyring("Não foi possível salvar as credenciais no cofre.".into())
+            CredError::Keyring(tr("Could not save credentials to the system keyring.", "Não foi possível salvar as credenciais no cofre.").into())
         })
     }
 
@@ -30,10 +31,10 @@ impl CredentialsManager {
         match Self::entry()?.get_password() {
             Ok(json) => serde_json::from_str(&json)
                 .map(Some)
-                .map_err(|_| CredError::Serialization("Credenciais armazenadas inválidas.".into())),
+                .map_err(|_| CredError::Serialization(tr("The stored credentials are invalid.", "Credenciais armazenadas inválidas.").into())),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(_) => Err(CredError::Keyring(
-                "Não foi possível ler as credenciais do cofre.".into(),
+                tr("Could not read credentials from the system keyring.", "Não foi possível ler as credenciais do cofre.").into(),
             )),
         }
     }
@@ -42,7 +43,7 @@ impl CredentialsManager {
         match Self::entry()?.delete_password() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(CredError::Keyring(
-                "Não foi possível remover as credenciais do cofre.".into(),
+                tr("Could not remove credentials from the system keyring.", "Não foi possível remover as credenciais do cofre.").into(),
             )),
         }
     }
@@ -57,7 +58,7 @@ impl CredentialsManager {
                 errors.push(ValidationError {
                     field: "access_key_id".to_string(),
                     reason:
-                        "Access Key ID deve conter exatamente 20 caracteres alfanuméricos maiúsculos."
+                        tr("Access Key ID must contain exactly 20 uppercase alphanumeric characters.", "Access Key ID deve conter exatamente 20 caracteres alfanuméricos maiúsculos.")
                             .to_string(),
                 });
             }
@@ -65,7 +66,7 @@ impl CredentialsManager {
             if creds.secret_access_key.chars().count() != 40 {
                 errors.push(ValidationError {
                     field: "secret_access_key".to_string(),
-                    reason: "Secret Access Key deve conter exatamente 40 caracteres.".to_string(),
+                    reason: tr("Secret Access Key must contain exactly 40 characters.", "Secret Access Key deve conter exatamente 40 caracteres.").to_string(),
                 });
             }
         }
@@ -74,7 +75,7 @@ impl CredentialsManager {
         if !region_re.is_match(&creds.region) {
             errors.push(ValidationError {
                 field: "region".to_string(),
-                reason: "AWS Region inválida (deve seguir o formato ex: us-east-1, sa-east-1)."
+                reason: tr("Invalid AWS region format (e.g. us-east-1, sa-east-1).", "AWS Region inválida (deve seguir o formato ex: us-east-1, sa-east-1).")
                     .to_string(),
             });
         }

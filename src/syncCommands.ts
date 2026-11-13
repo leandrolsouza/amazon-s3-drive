@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "./store";
+import { t } from "./i18n";
 
 export async function runSyncCommand(command: "start_sync" | "stop_sync") {
   const store = useSyncStore.getState();
-  if (store.syncAction) throw new Error("Aguarde a operação de sincronização em andamento.");
+  if (store.syncAction) throw new Error(t("Wait for the current sync operation to finish."));
   store.setSyncAction(command === "start_sync" ? "starting" : "stopping");
   try {
     await invoke(command);

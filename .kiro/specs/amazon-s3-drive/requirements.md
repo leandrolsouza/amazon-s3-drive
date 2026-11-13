@@ -226,3 +226,9 @@ O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no comput
 1. O aplicativo consulta o canal estável ao abrir e avisa quando encontra uma versão mais recente para o instalador em uso.
 2. Após a confirmação do usuário, o aplicativo verifica a assinatura e a versão do pacote, encerra a sincronização dos buckets e instala a atualização.
 3. Depois de reiniciar, o aplicativo mantém os dados de sincronização e retoma os vínculos habilitados.
+
+### Requisito 15 — Idioma da interface
+
+1. O aplicativo inicia em inglês (Estados Unidos) quando não há uma preferência válida salva.
+2. O seletor de idioma na barra lateral oferece inglês e português (Brasil). A escolha persiste entre sessões e é aplicada à interface e à bandeja do sistema.
+3. Os textos do aplicativo nos diálogos nativos, avisos e erros seguem o idioma escolhido. Registros históricos e mensagens fornecidas por serviços externos mantêm o texto de origem.

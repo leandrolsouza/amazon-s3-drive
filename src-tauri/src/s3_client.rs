@@ -1,4 +1,5 @@
-use crate::config_parser::{parse_s3_endpoint, S3_ENDPOINT_ERROR};
+use crate::language::tr;
+use crate::config_parser::{parse_s3_endpoint, s3_endpoint_error};
 use crate::db::Database;
 use crate::models::{
     AwsCredentials, CompletedPart, MultipartState, PartRange, S3Error, S3ObjectInfo,
@@ -144,7 +145,7 @@ impl S3Client {
         force_path_style: bool,
     ) -> Result<Self, S3Error> {
         let endpoint = parse_s3_endpoint(endpoint_url.as_deref())
-            .map_err(|_| S3Error::Sdk(S3_ENDPOINT_ERROR.into()))?;
+            .map_err(|_| S3Error::Sdk(s3_endpoint_error().into()))?;
         let region = aws_config::Region::new(creds.region.clone());
         let sdk_config = if creds.use_iam_role {
             aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -291,14 +292,14 @@ impl S3Client {
         use aws_sdk_s3::error::ProvideErrorMetadata;
 
         let ClientBackend::Aws(client) = &self.backend else {
-            return Err(S3Error::Sdk("Cliente AWS necessário.".into()));
+            return Err(S3Error::Sdk(tr("An AWS client is required.", "Cliente AWS necessário.").into()));
         };
         let mut pages = client.list_buckets().max_buckets(1000).into_paginator().send();
         let mut buckets = Vec::new();
         while let Some(page) = pages.next().await {
             let page = page.map_err(|error| {
                 S3Error::Sdk(error.as_service_error().and_then(|err| err.code())
-                    .unwrap_or("Falha ao listar os buckets.").to_string())
+                    .unwrap_or(tr("Could not list buckets.", "Falha ao listar os buckets.")).to_string())
             })?;
             buckets.extend(page.buckets().iter().filter_map(|bucket| {
                 Some((bucket.name()?.to_owned(), bucket.bucket_region().map(str::to_owned)))
@@ -313,14 +314,14 @@ impl S3Client {
         use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
 
         let ClientBackend::Aws(client) = &self.backend else {
-            return Err(S3Error::Sdk("Cliente AWS necessário.".into()));
+            return Err(S3Error::Sdk(tr("An AWS client is required.", "Cliente AWS necessário.").into()));
         };
         // Em us-east-1, repetir CreateBucket em um bucket próprio pode alterar ACLs legadas.
         if region == "us-east-1" {
             match client.head_bucket().bucket(&self.bucket).send().await {
                 Err(error) if error.raw_response().is_some_and(|r| r.status().as_u16() == 404) => {}
                 _ => return Err(S3Error::Sdk(
-                    "O nome já está em uso ou não foi possível confirmar sua disponibilidade.".into(),
+                    tr("The name is already in use or its availability could not be confirmed.", "O nome já está em uso ou não foi possível confirmar sua disponibilidade.").into(),
                 )),
             }
         }
@@ -336,11 +337,11 @@ impl S3Client {
         request.send().await.map_err(|error| {
             let code = error.as_service_error().and_then(|err| err.code());
             let message = match code {
-                Some("BucketAlreadyExists") => "Esse nome de bucket já está em uso.",
-                Some("BucketAlreadyOwnedByYou") => "Esse bucket já existe na sua conta. Adicione-o como existente.",
-                Some("AccessDenied") => "A identidade AWS precisa de s3:CreateBucket.",
+                Some("BucketAlreadyExists") => tr("This bucket name is already in use.", "Esse nome de bucket já está em uso."),
+                Some("BucketAlreadyOwnedByYou") => tr("This bucket already exists in your account. Add it as an existing bucket.", "Esse bucket já existe na sua conta. Adicione-o como existente."),
+                Some("AccessDenied") => tr("The AWS identity requires s3:CreateBucket.", "A identidade AWS precisa de s3:CreateBucket."),
                 Some(code) => code,
-                None => "O S3 não confirmou a criação. Consulte a lista de buckets antes de tentar novamente.",
+                None => tr("S3 did not confirm creation. Check the bucket list before trying again.", "O S3 não confirmou a criação. Consulte a lista de buckets antes de tentar novamente."),
             };
             S3Error::Sdk(message.into())
         })?;
@@ -515,7 +516,7 @@ impl S3Client {
             ClientBackend::Mock(mock) => {
                 let mut guard = mock.lock().unwrap();
                 if guard.fail_delete {
-                    return Err(S3Error::Sdk("Falha ao excluir o objeto.".into()));
+                    return Err(S3Error::Sdk(tr("Could not delete the object.", "Falha ao excluir o objeto.").into()));
                 }
                 if guard.objects.get(key).map(|o| normalize_etag(&o.etag))
                     != Some(normalize_etag(etag))

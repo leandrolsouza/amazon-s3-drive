@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { t } from "../i18n";
 
 export const LogsView: React.FC = () => {
   const [loadError, setLoadError] = useState(false);
@@ -57,9 +58,9 @@ export const LogsView: React.FC = () => {
     <div className="pane-container">
       <header className="command-bar">
         <div className="command-bar-left">
-          <h2 className="pane-title">Logs & Diagnóstico (sync.log)</h2>
+          <h2 className="pane-title">{t("Logs & Diagnostics (sync.log)")}</h2>
           <span className="state-tag mono badge-offline">
-            {filteredLines.length} LINHAS
+            {filteredLines.length} {t("LINES")}
           </span>
         </div>
 
@@ -78,18 +79,18 @@ export const LogsView: React.FC = () => {
             </svg>
             <input
               type="text"
-              placeholder="Filtrar eventos de log..."
+              placeholder={t("Filter log events...")}
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}
-              aria-label="Filtrar logs"
+              aria-label={t("Filter logs")}
             />
           </div>
 
           <div className="segmented-filter">
             {(
               [
-                { id: "ALL", label: "Todos" },
-                { id: "ERROR", label: "Erros" },
+                { id: "ALL", label: t("All") },
+                { id: "ERROR", label: t("Errors") },
                 { id: "INFO", label: "Info" },
               ] as const
             ).map((item) => (
@@ -117,7 +118,7 @@ export const LogsView: React.FC = () => {
           </button>
 
           <button type="button" className="btn-compact" onClick={loadLogs}>
-            Atualizar
+            {t("Refresh")}
           </button>
 
           <button
@@ -125,22 +126,22 @@ export const LogsView: React.FC = () => {
             className="btn-compact"
             onClick={handleClearLogs}
           >
-            Limpar
+            {t("Clear")}
           </button>
         </div>
       </header>
 
       {(loadError || clearError) && (
         <div role="alert" className="banner banner-error">
-          {loadError ? "Não foi possível carregar os logs. Os registros exibidos podem estar desatualizados." : "Não foi possível limpar os logs."}
-          <button type="button" onClick={loadError ? loadLogs : handleClearLogs}>Tentar novamente</button>
+          {loadError ? t("Could not load logs. The displayed entries may be out of date.") : t("Could not clear logs.")}
+          <button type="button" onClick={loadError ? loadLogs : handleClearLogs}>{t("Try again")}</button>
         </div>
       )}
       {filteredLines.length === 0 && !loadError ? (
         <div className="empty-table-view">
-          <p className="empty-status">Nenhum registro de log encontrado.</p>
+          <p className="empty-status">{t("No log entries found.")}</p>
           <span className="empty-subtext">
-            Eventos de sincronização e falhas aparecerão automaticamente aqui.
+            {t("Sync events and failures will appear here automatically.")}
           </span>
         </div>
       ) : (

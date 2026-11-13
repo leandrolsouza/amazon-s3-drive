@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { DeletionReview } from "../types";
+import { t } from "../i18n";
 
 export function DeletionReviewPanel({ bucketId, paused = false }: { bucketId?: number; paused?: boolean } = {}) {
   const [reviews, setReviews] = useState<DeletionReview[]>([]);
@@ -34,25 +35,25 @@ export function DeletionReviewPanel({ bucketId, paused = false }: { bucketId?: n
         setReviews((current) => current.filter((r) => r.s3_key !== item.s3_key));
       }
     } catch (cause) {
-      setError(`Não foi possível concluir. ${String(cause)}`);
+      setError(t("Could not complete the operation. {0}", String(cause)));
     } finally { setBusy(false); }
   };
   if (!reviews.length) return null;
-  return <div className="notification-card notification-warning deletion-review-panel" role="region" aria-label="Revisar exclusões">
-    <strong>{reviews.length} exclusão(ões) aguardando sua decisão</strong>
-    <p>Os arquivos não serão removidos nem restaurados automaticamente. Antes de excluir, uma cópia será preservada em .s3-drive-trash no destino da exclusão.</p>
-    {paused && <p>Inicie a sincronização deste bucket para concluir a revisão.</p>}
+  return <div className="notification-card notification-warning deletion-review-panel" role="region" aria-label={t("Review deletions")}>
+    <strong>{reviews.length} {t("deletion(s) awaiting review")}</strong>
+    <p>{t("Files will not be removed or restored automatically. Before deletion, a copy will be saved in .s3-drive-trash on the side where deletion takes place.")}</p>
+    {paused && <p>{t("Start syncing this bucket to complete the review.")}</p>}
     {error && <p role="alert">{error}</p>}
     <ul>{reviews.map((item) => <li key={item.s3_key}>
-      <p>{item.s3_key} — excluído {item.deleted_side === "local" ? "no computador" : "no S3"}.
-        {item.queued ? " Confirme a revisão remota antes de excluir." : item.other_side_changed && " Conflito: a outra versão foi editada."}</p>
-      <button disabled={busy || paused} onClick={() => void resolve([item], true)}>Restaurar arquivo</button>{" "}
-      <button disabled={busy || paused} onClick={() => void resolve([item], false)}>Confirmar exclusão</button>
+      <p>{item.s3_key} {t("— deleted") + " "}{item.deleted_side === "local" ? t("on this computer") : t("in S3")}.
+        {item.queued ? t(" Confirm the remote revision before deleting.") : item.other_side_changed && t(" Conflict: the other version was edited.")}</p>
+      <button disabled={busy || paused} onClick={() => void resolve([item], true)}>{t("Restore file")}</button>{" "}
+      <button disabled={busy || paused} onClick={() => void resolve([item], false)}>{t("Confirm deletion")}</button>
     </li>)}</ul>
     {reviews.length > 1 && <div className="conflict-actions">
-      <button disabled={busy || paused} onClick={() => void resolve(reviews, true)}>Restaurar todos</button>
+      <button disabled={busy || paused} onClick={() => void resolve(reviews, true)}>{t("Restore all")}</button>
       <button disabled={busy || paused || reviews.every((r) => r.other_side_changed)} onClick={() => void resolve(reviews.filter((r) => !r.other_side_changed), false)}>
-        Confirmar exclusões sem conflito
+        {t("Confirm deletions without conflicts")}
       </button>
     </div>}
   </div>;

@@ -1,3 +1,4 @@
+use crate::language::tr;
 use super::{aws_error, s3_client, sdk_config};
 use crate::AppState;
 use aws_sdk_s3::{
@@ -45,7 +46,7 @@ pub async fn preview_site_source(
     let config = state
         .config_parser
         .load()
-        .map_err(|_| "Salve a configuração AWS primeiro.")?;
+        .map_err(|_| tr("Save your AWS settings first.", "Salve a configuração AWS primeiro."))?;
     let s3 = if matches!(&source, SiteSource::S3 { .. }) {
         Some(s3_client(&sdk_config(&state, &config).await?))
     } else {
@@ -73,7 +74,7 @@ pub async fn browse_site_source(
     let config = state
         .config_parser
         .load()
-        .map_err(|_| "Salve a configuração AWS primeiro.")?;
+        .map_err(|_| tr("Save your AWS settings first.", "Salve a configuração AWS primeiro."))?;
     let s3 = s3_client(&sdk_config(&state, &config).await?);
     let (bucket, base) = remote_location(&config, &prefix)?;
     let mut pages = s3
@@ -88,7 +89,7 @@ pub async fn browse_site_source(
     let mut has_index = false;
     while let Some(page) = pages.next().await {
         let page =
-            page.map_err(|error| aws_error("navegar pelo bucket sincronizado", error.code()))?;
+            page.map_err(|error| aws_error(tr("browse the synced bucket", "navegar pelo bucket sincronizado"), error.code()))?;
         has_index |= page
             .contents()
             .iter()
@@ -123,10 +124,10 @@ fn remote_location<'a>(
 ) -> Result<(&'a str, String), String> {
     let bucket = config.bucket_name.trim();
     if bucket.is_empty() {
-        return Err("Configure o bucket de sincronização primeiro.".into());
+        return Err(tr("Set up the sync bucket first.", "Configure o bucket de sincronização primeiro.").into());
     }
     if !prefix.is_empty() && !valid_key(prefix) {
-        return Err("Pasta do bucket inválida.".into());
+        return Err(tr("Invalid bucket folder.", "Pasta do bucket inválida.").into());
     }
     let base = config.s3_prefix.as_deref().unwrap_or("").trim_matches('/');
     let mut parts = [base, prefix]
@@ -170,7 +171,7 @@ async fn candidates(
         }
         SiteSource::S3 { prefix } => {
             let (bucket, base) = remote_location(config, &prefix)?;
-            let s3 = s3.ok_or("Conexão com o S3 indisponível.")?;
+            let s3 = s3.ok_or(tr("The S3 connection is unavailable.", "Conexão com o S3 indisponível."))?;
             let mut pages = s3
                 .list_objects_v2()
                 .bucket(bucket)
@@ -180,7 +181,7 @@ async fn candidates(
             let mut files = Vec::new();
             while let Some(page) = pages.next().await {
                 let page =
-                    page.map_err(|error| aws_error("listar os arquivos do bucket", error.code()))?;
+                    page.map_err(|error| aws_error(tr("list the bucket files", "listar os arquivos do bucket"), error.code()))?;
                 for entry in page.contents() {
                     let Some(key) = entry.key() else { continue };
                     let Some(relative) = key.strip_prefix(&base).filter(|key| valid_key(key))
@@ -190,8 +191,8 @@ async fn candidates(
                     let size = entry
                         .size()
                         .and_then(|size| u64::try_from(size).ok())
-                        .ok_or("Tamanho de objeto S3 indisponível.")?;
-                    let revision = entry.e_tag().ok_or("Versão de objeto S3 indisponível.")?;
+                        .ok_or(tr("S3 object size unavailable.", "Tamanho de objeto S3 indisponível."))?;
+                    let revision = entry.e_tag().ok_or(tr("S3 object version unavailable.", "Versão de objeto S3 indisponível."))?;
                     files.push(Candidate {
                         file: SiteFile {
                             key: relative.to_owned(),
@@ -212,7 +213,7 @@ async fn candidates(
         .iter()
         .any(|candidate| candidate.file.key == "index.html")
     {
-        return Err("A pasta precisa conter um arquivo index.html na raiz.".into());
+        return Err(tr("The folder must contain index.html at its root.", "A pasta precisa conter um arquivo index.html na raiz.").into());
     }
     files.sort_by(|a, b| a.file.key.cmp(&b.file.key));
     Ok(files)
@@ -228,7 +229,7 @@ impl Selection {
         s3: &Client,
     ) -> Result<Self, String> {
         if !selected.iter().any(|file| file.key == "index.html") {
-            return Err("Inclua o index.html na seleção.".into());
+            return Err(tr("Include index.html in the selection.", "Inclua o index.html na seleção.").into());
         }
         let mut current: HashMap<_, _> = candidates(source, config, Some(s3))
             .await?
@@ -241,9 +242,9 @@ impl Selection {
                 let candidate = current
                     .remove(&file.key)
                     .filter(|entry| entry.file == file)
-                    .ok_or("A seleção mudou desde a revisão. Revise os arquivos novamente.")?;
+                    .ok_or(tr("The selection changed since the review. Review the files again.", "A seleção mudou desde a revisão. Revise os arquivos novamente."))?;
                 if file.size > 5_000_000_000 {
-                    return Err("A seleção contém um arquivo maior que 5 GB.");
+                    return Err(tr("The selection contains a file larger than 5 GB.", "A seleção contém um arquivo maior que 5 GB."));
                 }
                 Ok(candidate)
             })
@@ -259,32 +260,32 @@ impl Selection {
                 SourceFile::Local { root, path } => {
                     let resolved = tokio::fs::canonicalize(&path)
                         .await
-                        .map_err(|_| "Um arquivo mudou durante a publicação.")?;
+                        .map_err(|_| tr("A file changed during publishing.", "Um arquivo mudou durante a publicação."))?;
                     if resolved != path || !resolved.starts_with(&root) {
                         return Err(
-                            "Um arquivo mudou durante a publicação. Revise a seleção.".into()
+                            tr("A file changed during publishing. Review the selection.", "Um arquivo mudou durante a publicação. Revise a seleção.").into()
                         );
                     }
                     let source = tokio::fs::File::open(&resolved)
                         .await
-                        .map_err(|_| "Não foi possível abrir um arquivo do site.")?;
+                        .map_err(|_| tr("Could not open a site file.", "Não foi possível abrir um arquivo do site."))?;
                     let metadata = source
                         .metadata()
                         .await
-                        .map_err(|_| "Não foi possível verificar um arquivo do site.")?;
+                        .map_err(|_| tr("Could not verify a site file.", "Não foi possível verificar um arquivo do site."))?;
                     if !metadata.is_file()
                         || metadata.len() != file.size
                         || local_revision(&metadata)? != file.revision
                     {
                         return Err(
-                            "Um arquivo mudou durante a publicação. Revise a seleção.".into()
+                            tr("A file changed during publishing. Review the selection.", "Um arquivo mudou durante a publicação. Revise a seleção.").into()
                         );
                     }
                     let body = ByteStream::read_from()
                         .file(source)
                         .build()
                         .await
-                        .map_err(|_| "Não foi possível preparar um arquivo do site.")?;
+                        .map_err(|_| tr("Could not prepare a site file.", "Não foi possível preparar um arquivo do site."))?;
                     s3.put_object()
                         .bucket(bucket)
                         .key(target)
@@ -293,7 +294,7 @@ impl Selection {
                         .body(body)
                         .send()
                         .await
-                        .map_err(|error| aws_error("enviar os arquivos do site", error.code()))?;
+                        .map_err(|error| aws_error(tr("upload the site files", "enviar os arquivos do site"), error.code()))?;
                 }
                 SourceFile::S3 {
                     bucket: origin,
@@ -336,9 +337,9 @@ impl Selection {
 
 fn copy_error(code: Option<&str>) -> String {
     if matches!(code, Some("PreconditionFailed" | "NoSuchKey" | "NotFound")) {
-        return "Um arquivo mudou no S3. Revise a seleção novamente.".into();
+        return tr("A file changed in S3. Review the selection again.", "Um arquivo mudou no S3. Revise a seleção novamente.").into();
     }
-    aws_error("copiar os arquivos do site", code)
+    aws_error(tr("copy the site files", "copiar os arquivos do site"), code)
 }
 
 fn copy_source(bucket: &str, key: &str) -> String {
@@ -357,51 +358,51 @@ fn copy_source(bucket: &str, key: &str) -> String {
 fn local_revision(metadata: &std::fs::Metadata) -> Result<String, String> {
     let modified = metadata
         .modified()
-        .map_err(|_| "Data do arquivo indisponível.")?;
+        .map_err(|_| tr("File timestamp unavailable.", "Data do arquivo indisponível."))?;
     Ok(format!("{modified:?}"))
 }
 
 async fn collect_files(folder: &Path) -> Result<(PathBuf, Vec<(PathBuf, SiteFile)>), String> {
     if !folder.is_absolute() {
-        return Err("Informe o caminho completo da pasta do site.".into());
+        return Err(tr("Enter the full path to the site folder.", "Informe o caminho completo da pasta do site.").into());
     }
     let root = tokio::fs::canonicalize(folder)
         .await
-        .map_err(|_| "A pasta do site está inacessível.")?;
+        .map_err(|_| tr("The site folder is inaccessible.", "A pasta do site está inacessível."))?;
     if root.parent().is_none() {
-        return Err("Selecione uma pasta do site dentro da unidade.".into());
+        return Err(tr("Select a site folder on the drive.", "Selecione uma pasta do site dentro da unidade.").into());
     }
     let mut pending = vec![(root.clone(), String::new())];
     let mut files = Vec::new();
     while let Some((directory, prefix)) = pending.pop() {
         let mut entries = tokio::fs::read_dir(&directory)
             .await
-            .map_err(|_| "Não foi possível ler a pasta do site.")?;
+            .map_err(|_| tr("Could not read the site folder.", "Não foi possível ler a pasta do site."))?;
         while let Some(entry) = entries
             .next_entry()
             .await
-            .map_err(|_| "Não foi possível listar os arquivos do site.")?
+            .map_err(|_| tr("Could not list the site files.", "Não foi possível listar os arquivos do site."))?
         {
             let name = entry
                 .file_name()
                 .into_string()
-                .map_err(|_| "A pasta contém um nome de arquivo incompatível com URLs.")?;
+                .map_err(|_| tr("The folder contains a filename incompatible with URLs.", "A pasta contém um nome de arquivo incompatível com URLs."))?;
             let path = entry.path();
             let metadata = tokio::fs::symlink_metadata(&path)
                 .await
-                .map_err(|_| "Não foi possível ler um item da pasta do site.")?;
+                .map_err(|_| tr("Could not read an item in the site folder.", "Não foi possível ler um item da pasta do site."))?;
             if name.starts_with('.') || hidden(&metadata) {
                 continue;
             }
             if metadata.is_symlink() || reparse_point(&metadata) {
                 return Err(
-                    "A pasta contém um atalho simbólico. Remova-o antes de publicar.".into(),
+                    tr("The folder contains a symbolic link. Remove it before publishing.", "A pasta contém um atalho simbólico. Remova-o antes de publicar.").into(),
                 );
             }
             let key = format!("{prefix}{name}");
             if !valid_key(&key) {
                 return Err(
-                    "A pasta contém um nome de arquivo incompatível com URLs ou com o S3.".into(),
+                    tr("The folder contains a filename incompatible with URLs or S3.", "A pasta contém um nome de arquivo incompatível com URLs ou com o S3.").into(),
                 );
             }
             if metadata.is_dir() {
@@ -416,12 +417,12 @@ async fn collect_files(folder: &Path) -> Result<(PathBuf, Vec<(PathBuf, SiteFile
                     },
                 ));
             } else {
-                return Err("A pasta contém um item que não é um arquivo regular.".into());
+                return Err(tr("The folder contains an item that is not a regular file.", "A pasta contém um item que não é um arquivo regular.").into());
             }
         }
     }
     if !files.iter().any(|(_, file)| file.key == "index.html") {
-        return Err("A pasta precisa conter um arquivo index.html na raiz.".into());
+        return Err(tr("The folder must contain index.html at its root.", "A pasta precisa conter um arquivo index.html na raiz.").into());
     }
     Ok((root, files))
 }
@@ -498,6 +499,6 @@ mod tests {
         std::fs::create_dir(folder.path().join("nested")).unwrap();
         std::fs::write(folder.path().join("nested/index.html"), "").unwrap();
         let error = collect_files(folder.path()).await.unwrap_err();
-        assert!(error.contains("index.html na raiz"));
+        assert!(error.contains("index.html at its root"));
     }
 }

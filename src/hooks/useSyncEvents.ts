@@ -8,6 +8,7 @@ import {
   SyncErrorEvent,
   TransferProgressEvent,
 } from "../types";
+import { t } from "../i18n";
 
 export function useSyncEvents(): void {
   const updateFileStatus = useSyncStore((s) => s.updateFileStatus);
@@ -87,7 +88,7 @@ export function useSyncEvents(): void {
         const u8 = await listen<void>("credentials:expired", () => {
           if (isMounted) {
             setCredentialAlert(
-              "Suas credenciais AWS expiraram ou foram revogadas. A sincronização foi pausada."
+              t("Your AWS credentials expired or were revoked. Sync has been paused.")
             );
           }
         });
@@ -96,7 +97,7 @@ export function useSyncEvents(): void {
         const u9 = await listen<void>("credentials:invalid", () => {
           if (isMounted) {
             setCredentialAlert(
-              "Credenciais AWS inválidas. Verifique suas chaves de acesso."
+              t("Invalid AWS credentials. Check your access keys.")
             );
           }
         });
