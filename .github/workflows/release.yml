@@ -28,7 +28,7 @@ jobs:
           - os: windows-latest
             bundles: msi,nsis
           - os: macos-latest
-            bundles: dmg
+            bundles: app,dmg
     steps:
       - uses: actions/checkout@v6
         with:
