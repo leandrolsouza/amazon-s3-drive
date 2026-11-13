@@ -1,3 +1,4 @@
+use crate::config_parser::{parse_s3_endpoint, S3_ENDPOINT_ERROR};
 use crate::db::Database;
 use crate::models::{
     AwsCredentials, CompletedPart, MultipartState, PartRange, S3Error, S3ObjectInfo,
@@ -16,6 +17,27 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
+
+pub(crate) const TRANSFER_TEMP_PREFIX: &str = ".s3-drive-transfer-";
+
+pub(crate) fn transfer_temp_file(dest: &Path) -> Result<tempfile::NamedTempFile, S3Error> {
+    let parent = dest
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    tempfile::Builder::new()
+        .prefix(TRANSFER_TEMP_PREFIX)
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|err| S3Error::Io(err.to_string()))
+}
+
+fn object_prefix(prefix: Option<&str>) -> Option<String> {
+    prefix
+        .map(|prefix| prefix.trim_matches('/'))
+        .filter(|prefix| !prefix.is_empty())
+        .map(|prefix| format!("{prefix}/"))
+}
 
 pub const MIN_PART_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 pub const DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
@@ -97,24 +119,10 @@ pub fn validate_checksum(path: &Path, etag: &str) -> Result<bool, S3Error> {
     Ok(file_md5.eq_ignore_ascii_case(&normalized))
 }
 
-/// Garante que o diretório (e seus pais) existam. Se algum ancestral existir como arquivo
-/// (ex: marcador de pasta 0-byte do S3 baixado anteriormente como arquivo), remove o arquivo
-/// antes de criar o diretório para evitar `os error 183` no Windows.
+/// Cria o diretório e seus pais preservando arquivos existentes.
 pub fn ensure_dir_exists(dir: &Path) -> Result<(), S3Error> {
     if dir.as_os_str().is_empty() {
         return Ok(());
-    }
-    let mut ancestors: Vec<&Path> = dir.ancestors().collect();
-    ancestors.reverse();
-    for ancestor in ancestors {
-        if ancestor.as_os_str().is_empty() {
-            continue;
-        }
-        if let Ok(meta) = fs::symlink_metadata(ancestor) {
-            if meta.is_file() {
-                let _ = fs::remove_file(ancestor);
-            }
-        }
     }
     fs::create_dir_all(dir).map_err(|e| S3Error::Io(e.to_string()))
 }
@@ -135,6 +143,8 @@ impl S3Client {
         endpoint_url: Option<String>,
         force_path_style: bool,
     ) -> Result<Self, S3Error> {
+        let endpoint = parse_s3_endpoint(endpoint_url.as_deref())
+            .map_err(|_| S3Error::Sdk(S3_ENDPOINT_ERROR.into()))?;
         let region = aws_config::Region::new(creds.region.clone());
         let sdk_config = if creds.use_iam_role {
             aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -156,15 +166,10 @@ impl S3Client {
                 .await
         };
 
-        let mut s3_config_builder =
-            aws_sdk_s3::config::Builder::from(&sdk_config).force_path_style(force_path_style);
-
-        if let Some(ep) = endpoint_url {
-            let trimmed = ep.trim();
-            if !trimmed.is_empty() {
-                s3_config_builder = s3_config_builder.endpoint_url(trimmed);
-            }
-        }
+        let local_http = endpoint.as_ref().is_some_and(|url| url.scheme() == "http");
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config)
+            .force_path_style(force_path_style || local_http);
+        s3_config_builder.set_endpoint_url(endpoint.map(|url| url.to_string()));
 
         let inner = aws_sdk_s3::Client::from_conf(s3_config_builder.build());
         Ok(Self {
@@ -263,7 +268,7 @@ impl S3Client {
                 client
                     .list_objects_v2()
                     .bucket(&self.bucket)
-                    .set_prefix(prefix.map(str::to_owned))
+                    .set_prefix(object_prefix(prefix))
                     .max_keys(1)
                     .send()
                     .await
@@ -343,6 +348,7 @@ impl S3Client {
     }
 
     pub async fn list_objects(&self, prefix: Option<&str>) -> Result<Vec<S3ObjectInfo>, S3Error> {
+        let prefix = object_prefix(prefix);
         match &self.backend {
             ClientBackend::Aws(client) => {
                 let mut result = Vec::new();
@@ -350,10 +356,8 @@ impl S3Client {
 
                 loop {
                     let mut req = client.list_objects_v2().bucket(&self.bucket);
-                    if let Some(p) = prefix {
-                        if !p.is_empty() {
-                            req = req.prefix(p);
-                        }
+                    if let Some(prefix) = prefix.as_deref() {
+                        req = req.prefix(prefix);
                     }
                     if let Some(ref token) = continuation_token {
                         req = req.continuation_token(token);
@@ -400,8 +404,8 @@ impl S3Client {
                 let mut list: Vec<S3ObjectInfo> = guard
                     .objects
                     .iter()
-                    .filter(|(k, _)| match prefix {
-                        Some(p) if !p.is_empty() => k.starts_with(p),
+                    .filter(|(k, _)| match prefix.as_deref() {
+                        Some(p) => k.starts_with(p),
                         _ => true,
                     })
                     .map(|(k, v)| S3ObjectInfo {
@@ -426,7 +430,15 @@ impl S3Client {
                     .key(key)
                     .send()
                     .await
-                    .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                    .map_err(|err| {
+                        match err
+                            .raw_response()
+                            .map(|response| response.status().as_u16())
+                        {
+                            Some(404) => S3Error::ObjectNotFound,
+                            _ => S3Error::Sdk(err.to_string()),
+                        }
+                    })?;
 
                 let etag = resp.e_tag().map(normalize_etag).unwrap_or_default();
                 let size = resp.content_length().unwrap_or(0).max(0) as u64;
@@ -444,10 +456,7 @@ impl S3Client {
             }
             ClientBackend::Mock(mock) => {
                 let guard = mock.lock().unwrap();
-                let obj = guard
-                    .objects
-                    .get(key)
-                    .ok_or_else(|| S3Error::Sdk(format!("NoSuchKey: {}", key)))?;
+                let obj = guard.objects.get(key).ok_or(S3Error::ObjectNotFound)?;
                 Ok(S3ObjectInfo {
                     key: key.to_string(),
                     etag: normalize_etag(&obj.etag),
@@ -492,18 +501,26 @@ impl S3Client {
                     .if_match(format!("\"{}\"", normalize_etag(etag)))
                     .send()
                     .await
-                    .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                    .map_err(|err| {
+                        match err
+                            .raw_response()
+                            .map(|response| response.status().as_u16())
+                        {
+                            Some(404 | 409 | 412) => S3Error::PreconditionFailed,
+                            _ => S3Error::Sdk(err.to_string()),
+                        }
+                    })?;
                 Ok(())
             }
             ClientBackend::Mock(mock) => {
                 let mut guard = mock.lock().unwrap();
-                if guard.fail_delete
-                    || guard.objects.get(key).map(|o| normalize_etag(&o.etag))
-                        != Some(normalize_etag(etag))
+                if guard.fail_delete {
+                    return Err(S3Error::Sdk("Falha ao excluir o objeto.".into()));
+                }
+                if guard.objects.get(key).map(|o| normalize_etag(&o.etag))
+                    != Some(normalize_etag(etag))
                 {
-                    return Err(S3Error::Sdk(
-                        "Exclusão cancelada: versão mudou ou remoção falhou.".into(),
-                    ));
+                    return Err(S3Error::PreconditionFailed);
                 }
                 guard.objects.remove(key);
                 Ok(())
@@ -782,10 +799,7 @@ impl S3Client {
             }
         }
 
-        let temp_path = dest.with_extension("tmp");
-        if temp_path.exists() {
-            let _ = fs::remove_file(&temp_path);
-        }
+        let mut temp = transfer_temp_file(dest)?;
 
         let expected_etag = match &self.backend {
             ClientBackend::Aws(client) => {
@@ -802,9 +816,9 @@ impl S3Client {
                 // Transmitir o corpo diretamente para o arquivo temporário sem
                 // carregar o objeto inteiro em memória (Requisito 3.5).
                 let mut reader = resp.body.into_async_read();
-                let mut tmp_file = tokio::fs::File::create(&temp_path)
-                    .await
-                    .map_err(|e| S3Error::Io(e.to_string()))?;
+                let mut tmp_file = tokio::fs::File::from_std(
+                    temp.reopen().map_err(|e| S3Error::Io(e.to_string()))?,
+                );
                 tokio::io::copy(&mut reader, &mut tmp_file)
                     .await
                     .map_err(|e| S3Error::Sdk(format!("Erro ao transmitir '{}': {}", key, e)))?;
@@ -830,8 +844,7 @@ impl S3Client {
                     )
                 };
 
-                let mut tmp_file =
-                    File::create(&temp_path).map_err(|e| S3Error::Io(e.to_string()))?;
+                let tmp_file = temp.as_file_mut();
                 if corrupt {
                     let mut corrupted = bytes;
                     corrupted.push(0xFF);
@@ -849,11 +862,10 @@ impl S3Client {
         };
 
         // Requisito 3.6 e 3.7: validar integridade via MD5 checksum contra ETag
-        let actual_md5 = compute_md5(&temp_path)?;
-        let is_valid = validate_checksum(&temp_path, &expected_etag)?;
+        let actual_md5 = compute_md5(temp.path())?;
+        let is_valid = validate_checksum(temp.path(), &expected_etag)?;
 
         if !is_valid {
-            let _ = fs::remove_file(&temp_path);
             return Err(S3Error::ChecksumMismatch {
                 file: key.to_string(),
                 expected: expected_etag,
@@ -861,12 +873,13 @@ impl S3Client {
             });
         }
 
-        if dest.exists() && dest.is_file() {
-            let _ = fs::remove_file(dest);
-        }
-        let downloaded_len = fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+        let downloaded_len = temp
+            .as_file()
+            .metadata()
+            .map_err(|e| S3Error::Io(e.to_string()))?
+            .len();
         self.apply_bandwidth_throttle(downloaded_len).await;
-        fs::rename(&temp_path, dest).map_err(|e| S3Error::Io(e.to_string()))?;
+        temp.persist(dest).map_err(|e| S3Error::Io(e.to_string()))?;
         Ok(expected_etag)
     }
 
@@ -990,18 +1003,11 @@ impl S3Client {
                     .map_err(|e| S3Error::Sdk(e.to_string()))?
                     .into_bytes();
 
-                let temp_path = dest.with_extension("tmp");
-                let mut tmp_file =
-                    File::create(&temp_path).map_err(|e| S3Error::Io(e.to_string()))?;
-                tmp_file
-                    .write_all(&bytes)
+                let mut temp = transfer_temp_file(dest)?;
+                temp.write_all(&bytes)
                     .map_err(|e| S3Error::Io(e.to_string()))?;
-                tmp_file.flush().map_err(|e| S3Error::Io(e.to_string()))?;
-
-                if dest.exists() && dest.is_file() {
-                    let _ = fs::remove_file(dest);
-                }
-                fs::rename(&temp_path, dest).map_err(|e| S3Error::Io(e.to_string()))?;
+                temp.flush().map_err(|e| S3Error::Io(e.to_string()))?;
+                temp.persist(dest).map_err(|e| S3Error::Io(e.to_string()))?;
                 Ok(etag)
             }
             ClientBackend::Mock(_) => self.download_file(key, dest).await,

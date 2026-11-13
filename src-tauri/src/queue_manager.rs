@@ -116,6 +116,18 @@ impl QueueManager {
         Ok(())
     }
 
+    pub fn active_delete_keys(&self) -> Result<std::collections::HashSet<String>, QueueError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare_cached("SELECT s3_key FROM sync_queue WHERE operation_type = 'Delete' AND state IN ('Pending', 'Processing')")
+            .map_err(|err| QueueError::Database(err.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|err| QueueError::Database(err.to_string()))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|err| QueueError::Database(err.to_string()))
+    }
+
     pub fn get_item(&self, id: i64) -> Result<Option<QueueItem>, QueueError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(

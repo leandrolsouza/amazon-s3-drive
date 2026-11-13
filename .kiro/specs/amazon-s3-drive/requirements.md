@@ -220,3 +220,9 @@ O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no comput
 2. Os vínculos podem sincronizar simultaneamente. Cada vínculo adicional tem controles de início e pausa e mostra sua atividade e revisões de exclusão. O estado habilitado persiste entre sessões.
 3. O cadastro rejeita buckets duplicados e pastas locais sobrepostas. A atualização preserva a configuração e o estado do bucket principal.
 4. O usuário pode criar um bucket privado no Amazon S3 informando nome e região e configurar sua sincronização depois.
+
+### Requisito 14 — Atualização do aplicativo
+
+1. O aplicativo consulta o canal estável ao abrir e avisa quando encontra uma versão mais recente para o instalador em uso.
+2. Após a confirmação do usuário, o aplicativo verifica a assinatura e a versão do pacote, encerra a sincronização dos buckets e instala a atualização.
+3. Depois de reiniciar, o aplicativo mantém os dados de sincronização e retoma os vínculos habilitados.

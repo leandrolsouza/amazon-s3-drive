@@ -169,7 +169,7 @@ pub struct SyncOperation {
     pub operation_type: SyncOperationType,
     pub s3_key: String,
     pub local_path: String,
-    pub extra: Option<String>, // caminho/key destino para Rename/Move
+    pub extra: Option<String>, // destino para Rename/Move ou ETag esperado para Delete
 }
 
 // === Item da Fila Persistida ===
@@ -190,6 +190,8 @@ pub struct DeletionReview {
     pub deleted_side: String,
     pub other_side_changed: bool,
     pub remote_etag: Option<String>,
+    #[serde(default)]
+    pub queued: bool,
     pub local_hash: Option<String>,
 }
 
@@ -450,6 +452,10 @@ pub enum ConflictError {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error, Serialize, Deserialize)]
 pub enum S3Error {
+    #[error("Objeto S3 inexistente")]
+    ObjectNotFound,
+    #[error("A revisão do objeto S3 mudou")]
+    PreconditionFailed,
     #[error("AWS S3 SDK error: {0}")]
     Sdk(String),
     #[error("IO error during S3 operation: {0}")]

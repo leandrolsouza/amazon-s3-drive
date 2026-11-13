@@ -414,6 +414,18 @@ Implementação do Amazon S3 Drive — aplicação desktop cross-platform com Ta
     - Fluxo completo: configuração → iniciar sync → verificar StatusView → verificar ícone de tray
     - _Requirements: 1.1, 1.2, 1.3_
 
+  - Validação manual da restauração no app desktop
+    1. Em um ambiente de teste, configure a sincronização bidirecional entre uma pasta descartável e um bucket de teste. Inicie o app com `npm run tauri dev`.
+    2. Crie `revisao.txt` com conteúdo conhecido. Aguarde o status de sincronizado e confirme que o objeto existe no S3.
+    3. Exclua o arquivo pelo gerenciador de arquivos do sistema. Aguarde a entrada em **Revisar exclusões** e confirme que o objeto ainda existe no S3.
+    4. Encerre o app pela opção **Sair** na bandeja e abra-o novamente. Se necessário, inicie a sincronização e volte à tela do bucket usado no teste.
+    5. Confira que a revisão continua pendente e que o arquivo ainda está ausente no disco. Clique em **Restaurar arquivo**. Verifique o conteúdo do arquivo no caminho original e confirme que a revisão continua ausente após a atualização do painel.
+
+  - Validação da exclusão condicional no Amazon S3
+    - Use um bucket dedicado e sem versionamento, com um perfil AWS autenticado e acesso de leitura, gravação e exclusão ao prefixo `s3-drive-integration/`.
+    - Defina `S3_DRIVE_TEST_BUCKET` e `S3_DRIVE_TEST_REGION` no ambiente e selecione o perfil com `AWS_PROFILE`.
+    - Execute `cargo test --manifest-path src-tauri/Cargo.toml --test s3_live -- --ignored`. O teste grava um objeto de nome aleatório, substitui seu conteúdo, verifica que o ETag antigo não autoriza a exclusão e remove o objeto com o ETag atual.
+
 - [x] 21. Configuração de packaging e distribuição
   - [x] 21.1 Configurar `tauri.conf.json` para empacotamento final
     - Definir `bundle.identifier`, ícones da aplicação (tray e dock/taskbar em múltiplos tamanhos)
@@ -463,3 +475,10 @@ Implementação do Amazon S3 Drive — aplicação desktop cross-platform com Ta
   ]
 }
 ```
+
+### Publicação e validação do atualizador
+
+1. Gere um par de chaves com `npm run tauri signer generate -- -w <caminho-fora-do-repositorio>`. Faça backup da chave privada em local seguro.
+2. Configure a variável de repositório `TAURI_UPDATER_PUBLIC_KEY` com o conteúdo da chave pública. Cadastre o conteúdo da chave privada como segredo `TAURI_SIGNING_PRIVATE_KEY` e a senha como `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+3. Atualize a versão em `src-tauri/tauri.conf.json` e publique a tag correspondente `vMAJOR.MINOR.PATCH`. Depois que todos os jobs passarem, confira o `latest.json` e os pacotes assinados no rascunho antes de publicar como release estável e mais recente.
+4. Instale manualmente a primeira versão que inclui o atualizador. Publique a próxima e abra a anterior com dois buckets habilitados e um pausado. Confirme a atualização, a retomada dos vínculos habilitados e a preservação das filas e do vínculo pausado.

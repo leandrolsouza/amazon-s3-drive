@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { NotificationHandler } from "./components/NotificationHandler";
+import { AppUpdateNotice } from "./components/AppUpdateNotice";
 import { DeletionReviewPanel } from "./components/DeletionReviewPanel";
 import { useSyncEvents } from "./hooks/useSyncEvents";
 import { ConfigurationPage } from "./pages/ConfigurationPage";
@@ -359,6 +360,7 @@ export const App: React.FC = () => {
 
         {/* Painel Central */}
         <div className="workspace-pane">
+          <AppUpdateNotice />
           <NotificationHandler onOpenConfig={() => setActiveTab("config")} />
           {activeTab !== "buckets" && <DeletionReviewPanel />}
           {startupError && (

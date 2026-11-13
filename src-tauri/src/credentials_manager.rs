@@ -1,72 +1,50 @@
 use crate::models::{AwsCredentials, CredError, ValidationError};
 use crate::s3_client::S3Client;
 use regex::Regex;
-use std::sync::{Arc, Mutex};
 
 const KEYRING_SERVICE: &str = "amazon-s3-drive";
 const KEYRING_USER: &str = "aws-credentials";
 
-#[derive(Debug, Clone)]
-pub struct CredentialsManager {
-    service: &'static str,
-    // Fallback em memória para ambientes de teste onde o serviço de keyring do SO não está disponível
-    memory_fallback: Arc<Mutex<Option<AwsCredentials>>>,
-}
-
-impl Default for CredentialsManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Debug, Clone, Default)]
+pub struct CredentialsManager;
 
 impl CredentialsManager {
     pub fn new() -> Self {
-        Self {
-            service: KEYRING_SERVICE,
-            memory_fallback: Arc::new(Mutex::new(None)),
-        }
+        Self
+    }
+
+    fn entry() -> Result<keyring::Entry, CredError> {
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|_| CredError::Keyring("Cofre de credenciais indisponível.".into()))
     }
 
     pub fn store(&self, creds: &AwsCredentials) -> Result<(), CredError> {
         let json =
             serde_json::to_string(creds).map_err(|e| CredError::Serialization(e.to_string()))?;
-
-        if let Ok(entry) = keyring::Entry::new(self.service, KEYRING_USER) {
-            let _ = entry.set_password(&json);
-        }
-        *self.memory_fallback.lock().unwrap() = Some(creds.clone());
-        Ok(())
+        Self::entry()?.set_password(&json).map_err(|_| {
+            CredError::Keyring("Não foi possível salvar as credenciais no cofre.".into())
+        })
     }
 
     pub fn load(&self) -> Result<Option<AwsCredentials>, CredError> {
-        if let Some(cached) = self.memory_fallback.lock().unwrap().clone() {
-            return Ok(Some(cached));
-        }
-
-        match keyring::Entry::new(self.service, KEYRING_USER) {
-            Ok(entry) => match entry.get_password() {
-                Ok(json) => {
-                    let creds: AwsCredentials = serde_json::from_str(&json)
-                        .map_err(|e| CredError::Serialization(e.to_string()))?;
-                    *self.memory_fallback.lock().unwrap() = Some(creds.clone());
-                    Ok(Some(creds))
-                }
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(_) => Ok(None),
-            },
-            Err(_) => Ok(None),
+        match Self::entry()?.get_password() {
+            Ok(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(|_| CredError::Serialization("Credenciais armazenadas inválidas.".into())),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(CredError::Keyring(
+                "Não foi possível ler as credenciais do cofre.".into(),
+            )),
         }
     }
 
     pub fn delete(&self) -> Result<(), CredError> {
-        *self.memory_fallback.lock().unwrap() = None;
-        if let Ok(entry) = keyring::Entry::new(self.service, KEYRING_USER) {
-            match entry.delete_password() {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
-                Err(_) => {}
-            }
+        match Self::entry()?.delete_password() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(CredError::Keyring(
+                "Não foi possível remover as credenciais do cofre.".into(),
+            )),
         }
-        Ok(())
     }
 
     /// Valida o formato dos campos sem chamar a API AWS (Requisito 4.1 e 4.2)
@@ -122,6 +100,33 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn reports_unavailable_keyring_on_read_and_delete() {
+        struct UnavailableKeyring;
+
+        impl keyring::credential::CredentialBuilderApi for UnavailableKeyring {
+            fn build(
+                &self,
+                _: Option<&str>,
+                _: &str,
+                _: &str,
+            ) -> keyring::Result<Box<keyring::Credential>> {
+                Err(keyring::Error::NoStorageAccess(Box::new(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                )))
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        keyring::set_default_credential_builder(Box::new(UnavailableKeyring));
+        let manager = CredentialsManager::new();
+        assert!(matches!(manager.load(), Err(CredError::Keyring(_))));
+        assert!(matches!(manager.delete(), Err(CredError::Keyring(_))));
+    }
+
     fn arb_valid_credentials() -> impl Strategy<Value = AwsCredentials> {
         (
             "[A-Z0-9]{20}",
@@ -129,15 +134,15 @@ mod tests {
             prop::option::of("[A-Za-z0-9/+=]{16,32}"),
             "[a-z]{2}-[a-z]{3,10}-[0-9]",
         )
-            .prop_map(|(access_key_id, secret_access_key, session_token, region)| {
-                AwsCredentials {
+            .prop_map(
+                |(access_key_id, secret_access_key, session_token, region)| AwsCredentials {
                     access_key_id,
                     secret_access_key,
                     session_token,
                     region,
                     use_iam_role: false,
-                }
-            })
+                },
+            )
     }
 
     fn arb_invalid_credentials() -> impl Strategy<Value = AwsCredentials> {
@@ -161,13 +166,15 @@ mod tests {
                 "[A-Z]{2}-[A-Z]{4}-[1-9]"
             ),
         ]
-        .prop_map(|(access_key_id, secret_access_key, region)| AwsCredentials {
-            access_key_id,
-            secret_access_key,
-            session_token: None,
-            region,
-            use_iam_role: false,
-        })
+        .prop_map(
+            |(access_key_id, secret_access_key, region)| AwsCredentials {
+                access_key_id,
+                secret_access_key,
+                session_token: None,
+                region,
+                use_iam_role: false,
+            },
+        )
     }
 
     // Feature: amazon-s3-drive, Property 3: Credential format validation

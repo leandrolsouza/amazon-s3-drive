@@ -1233,3 +1233,20 @@ Via Tauri's WebDriver API: fluxo completo de configuração → sync → status 
 - O catálogo `bucket_profiles` no SQLite guarda o ID estável, a configuração e o estado habilitado dos vínculos adicionais. Cada ID tem seu próprio motor, monitor, banco e log em `buckets/<id>/`. A interface consulta atividade, conflitos e revisões de exclusão pelo ID do vínculo.
 - Buckets adicionais usam a identidade AWS configurada no aplicativo e podem escolher região, prefixo e pasta local. O cadastro valida acesso e rejeita nomes de bucket duplicados e pastas locais sobrepostas. O vínculo entra pausado. Vínculos habilitados são retomados separadamente ao abrir o app.
 - A criação de bucket usa a API do Amazon S3 com os padrões de privacidade da AWS. A configuração da sincronização é uma etapa posterior, com validação de acesso independente da criação.
+
+### Limites de segurança das operações de arquivos
+
+- O backend aplica o prefixo S3 ativo antes de compartilhar, mover, excluir, restaurar ou reenfileirar objetos. O caminho local deriva da chave relativa ao prefixo, preservando o caminho já registrado quando ele permanece dentro da raiz.
+- Ações locais validam a raiz e os componentes existentes do caminho antes da operação e rejeitam links simbólicos e pontos de nova análise no Windows. A resolução de conflitos só aceita o par de arquivos registrado pelo backend ao emitir a notificação.
+- Downloads comuns e restauração de versões gravam em um arquivo temporário exclusivo no diretório de destino. O sincronizador ignora esses arquivos internos, e o download substitui o destino após gravar o conteúdo com sucesso.
+- Um marcador de pasta remoto não substitui um arquivo local. O arquivo permanece no disco até que o usuário resolva a colisão de nomes.
+
+- A fila guarda o ETag conhecido quando uma exclusão é enfileirada. Se a revisão mudou ou uma operação antiga não tem ETag, a decisão volta para revisão antes de remover o objeto remoto. O endpoint S3 precisa implementar exclusões condicionais por ETag.
+- A aplicação informa falhas de leitura, gravação e remoção no cofre nativo. O cliente exige HTTPS para endpoints remotos e permite HTTP apenas para endereços IP de loopback, com endereçamento por caminho.
+- A WebView de produção aplica CSP. Os comandos Rust da interface são concedidos explicitamente à janela local principal e o frontend recebe as permissões de escutar e cancelar a escuta de eventos.
+
+### Atualização do aplicativo
+
+- O updater do Tauri consulta o `latest.json` do GitHub Releases via HTTPS. A instalação valida a assinatura do pacote e a versão incluída na assinatura. O canal atende MSI e NSIS no Windows, macOS e AppImage no Linux. Pacotes DEB seguem o fluxo do gerenciador de pacotes.
+- A interface verifica ao abrir e pede confirmação para baixar, instalar e reiniciar. O backend baixa e verifica o pacote antes de encerrar os motores. O catálogo mantém as preferências de início e pausa para a retomada no próximo processo.
+- O workflow gera instaladores assinados e agrega o manifesto em uma release estável em rascunho. O manifesto e os pacotes precisam ficar acessíveis sem autenticação ao publicar. Builds locais com chave vazia seguem com o atualizador desabilitado.

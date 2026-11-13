@@ -25,6 +25,7 @@ impl SyncEngine {
         &self,
         entry: &FileEntry,
         remote: Option<&crate::models::S3ObjectInfo>,
+        queued: bool,
     ) -> Result<(), SyncError> {
         let local_hash = if Path::new(&entry.local_path)
             .try_exists()
@@ -38,13 +39,15 @@ impl SyncEngine {
             s3_key: entry.s3_key.clone(),
             local_path: entry.local_path.clone(),
             deleted_side: if remote.is_some() { "local" } else { "remote" }.into(),
-            other_side_changed: match remote {
-                Some(obj) => entry.last_sync_etag.as_ref() != Some(&obj.etag),
-                None => {
-                    local_hash.as_ref()
-                        != entry.local_hash.as_ref().or(entry.last_sync_etag.as_ref())
-                }
-            },
+            queued,
+            other_side_changed: queued
+                || match remote {
+                    Some(obj) => entry.last_sync_etag.as_ref() != Some(&obj.etag),
+                    None => {
+                        local_hash.as_ref()
+                            != entry.local_hash.as_ref().or(entry.last_sync_etag.as_ref())
+                    }
+                },
             remote_etag: remote.map(|obj| obj.etag.clone()),
             local_hash,
         };
@@ -97,7 +100,8 @@ impl SyncEngine {
         let _guard = self.reconciliation_lock.lock().await;
         let key = expected.s3_key.as_str();
         let cfg = self.get_config();
-        if !cfg.sync_direction.eq_ignore_ascii_case("Bidirectional") {
+        let relative_key = scoped_key(key, &cfg)?;
+        if !expected.queued && !cfg.sync_direction.eq_ignore_ascii_case("Bidirectional") {
             return Err(SyncError::Conflict(
                 "A direção da sincronização mudou. Revise a configuração.".into(),
             ));
@@ -162,7 +166,8 @@ impl SyncEngine {
         } else {
             // Preservar o conteúdo antes da exclusão; falhar sem remover se a cópia falhar.
             if review.deleted_side == "local" {
-                let trash_key = apply_s3_prefix(format!("{TRASH}/{stamp}/{key}"), &cfg.s3_prefix);
+                let trash_key =
+                    apply_s3_prefix(format!("{TRASH}/{stamp}/{relative_key}"), &cfg.s3_prefix);
                 client.copy_object(key, &trash_key).await?;
                 if client.head_object(key).await?.etag
                     != review.remote_etag.clone().unwrap_or_default()
@@ -178,11 +183,14 @@ impl SyncEngine {
                 let trash_dir = Path::new(&cfg.local_path)
                     .join(TRASH)
                     .join(stamp.to_string());
+                require_local_path(&trash_dir, Path::new(&cfg.local_path))?;
                 fs::create_dir_all(&trash_dir).map_err(|e| SyncError::Io(e.to_string()))?;
                 let name = path
                     .file_name()
                     .ok_or_else(|| SyncError::Io("Nome inválido.".into()))?;
-                fs::rename(path, trash_dir.join(name)).map_err(|e| SyncError::Io(e.to_string()))?;
+                let trash_path = trash_dir.join(name);
+                require_local_path(&trash_path, Path::new(&cfg.local_path))?;
+                fs::rename(path, trash_path).map_err(|e| SyncError::Io(e.to_string()))?;
             }
             self.db
                 .delete_file_entry(key)

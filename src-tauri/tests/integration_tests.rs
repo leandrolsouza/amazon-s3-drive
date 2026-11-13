@@ -121,12 +121,16 @@ async fn test_download_with_valid_and_invalid_checksum() {
 
     // 1. Download com checksum válido -> sucesso
     let dest_ok = dir.path().join("remote_ok.txt");
+    fs::write(&dest_ok, b"previous").unwrap();
+    let neighbor = dest_ok.with_extension("tmp");
+    fs::write(&neighbor, b"unrelated").unwrap();
     let returned_etag = s3_client
         .download_file("remote.txt", &dest_ok)
         .await
         .unwrap();
     assert_eq!(returned_etag, etag);
     assert_eq!(fs::read(&dest_ok).unwrap(), payload);
+    assert_eq!(fs::read(&neighbor).unwrap(), b"unrelated");
 
     // 2. Download com checksum inválido (corrompido) -> descarta temporário e retorna ChecksumMismatch
     {
@@ -134,19 +138,14 @@ async fn test_download_with_valid_and_invalid_checksum() {
         guard.corrupt_downloads = true;
     }
     let dest_bad = dir.path().join("remote_corrupt.txt");
+    fs::write(&dest_bad, b"previous").unwrap();
     let err = s3_client
         .download_file("remote.txt", &dest_bad)
         .await
         .unwrap_err();
     assert!(matches!(err, S3Error::ChecksumMismatch { .. }));
-    assert!(
-        !dest_bad.exists(),
-        "Corrupted file must not exist at destination"
-    );
-    assert!(
-        !dest_bad.with_extension("tmp").exists(),
-        "Temp file must be discarded on checksum failure"
-    );
+    assert_eq!(fs::read(&dest_bad).unwrap(), b"previous");
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
 }
 
 #[tokio::test]
@@ -291,12 +290,12 @@ async fn test_invalid_credentials_rejected_on_verify_access() {
 }
 
 #[tokio::test]
-async fn test_s3_folder_marker_and_nested_file_download_without_os_error_183() {
+async fn test_s3_folder_marker_preserves_existing_file_and_downloads_after_collision_is_resolved() {
     let dir = tempdir().unwrap();
     let db = Database::new_in_memory().unwrap();
     let (s3_client, mock_backend) = S3Client::new_mock("my-test-bucket", Some(db.clone()));
 
-    // Simular arquivo 0-byte "boletos" criado anteriormente no disco no lugar da pasta
+    // A folder marker must never replace a local file, even if it is empty.
     let stale_file_as_dir = dir.path().join("boletos");
     fs::write(&stale_file_as_dir, b"").unwrap();
     assert!(stale_file_as_dir.is_file());
@@ -341,10 +340,12 @@ async fn test_s3_folder_marker_and_nested_file_download_without_os_error_183() {
     engine.poll_remote_changes().await.unwrap();
     engine.process_queue().await.unwrap();
 
-    assert!(
-        stale_file_as_dir.is_dir(),
-        "'boletos' must be converted into a directory"
-    );
+    assert!(stale_file_as_dir.is_file());
+    fs::remove_file(&stale_file_as_dir).unwrap();
+    engine.poll_remote_changes().await.unwrap();
+    engine.process_queue().await.unwrap();
+
+    assert!(stale_file_as_dir.is_dir());
     let downloaded_pdf = stale_file_as_dir.join("Condominio - Ex Atlas Garantia.pdf");
     assert!(downloaded_pdf.is_file());
     assert_eq!(fs::read(&downloaded_pdf).unwrap(), pdf_bytes);

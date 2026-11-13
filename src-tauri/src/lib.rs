@@ -13,6 +13,7 @@ mod site_publisher;
 pub mod status_monitor;
 pub mod sync_engine;
 pub mod tray;
+mod updater;
 
 use crate::config_parser::ConfigParser;
 use crate::credentials_manager::CredentialsManager;
@@ -25,8 +26,8 @@ use crate::network_detector::NetworkDetector;
 use crate::queue_manager::QueueManager;
 use crate::s3_client::S3Client;
 use crate::status_monitor::StatusMonitor;
-use crate::sync_engine::{s3_key_to_local_path, SyncEngine, TauriEmitter};
-use std::path::PathBuf;
+use crate::sync_engine::{SyncEngine, TauriEmitter};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Manager, State};
 
@@ -37,6 +38,7 @@ pub struct AppState {
     pub db: Database,
     buckets: Arc<buckets::BucketCatalog>,
     primary_lifecycle: tokio::sync::Mutex<()>,
+    update_installation: tokio::sync::Mutex<()>,
     site_publication: tokio::sync::Mutex<()>,
 }
 
@@ -385,11 +387,23 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 #[tauri::command]
-fn open_local_folder(path: String) -> Result<(), String> {
-    let p = PathBuf::from(&path);
+fn open_local_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let configured = state.sync_engine.get_config().local_path;
+    if configured.trim().is_empty() || path != configured {
+        return Err("O caminho deve ser a pasta de sincronização configurada.".into());
+    }
+    open_folder(Path::new(&configured))
+}
+
+fn open_folder(p: &Path) -> Result<(), String> {
     if !p.exists() {
-        std::fs::create_dir_all(&p)
-            .map_err(|e| format!("Não foi possível criar/abrir a pasta '{}': {}", path, e))?;
+        std::fs::create_dir_all(&p).map_err(|e| {
+            format!(
+                "Não foi possível criar/abrir a pasta '{}': {}",
+                p.display(),
+                e
+            )
+        })?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -418,7 +432,10 @@ fn open_local_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 fn open_file_in_os(s3_key: String, state: State<'_, AppState>) -> Result<(), String> {
     let cfg = state.sync_engine.get_config();
-    let local_path = s3_key_to_local_path(&s3_key, &PathBuf::from(&cfg.local_path));
+    let local_path = state
+        .sync_engine
+        .scoped_local_path(&s3_key, &cfg)
+        .map_err(|err| err.to_string())?;
     if !local_path.exists() {
         return Err(format!(
             "O arquivo local ainda não existe em '{}'.",
@@ -452,7 +469,10 @@ fn open_file_in_os(s3_key: String, state: State<'_, AppState>) -> Result<(), Str
 #[tauri::command]
 fn reveal_file_in_folder(s3_key: String, state: State<'_, AppState>) -> Result<(), String> {
     let cfg = state.sync_engine.get_config();
-    let local_path = s3_key_to_local_path(&s3_key, &PathBuf::from(&cfg.local_path));
+    let local_path = state
+        .sync_engine
+        .scoped_local_path(&s3_key, &cfg)
+        .map_err(|err| err.to_string())?;
     #[cfg(target_os = "windows")]
     {
         if local_path.exists() {
@@ -470,7 +490,7 @@ fn reveal_file_in_folder(s3_key: String, state: State<'_, AppState>) -> Result<(
     #[cfg(not(target_os = "windows"))]
     {
         if let Some(parent) = local_path.parent() {
-            let _ = open_local_folder(parent.to_string_lossy().to_string());
+            open_folder(parent)?;
         }
     }
     Ok(())
@@ -788,6 +808,7 @@ async fn get_s3_monthly_spend(state: State<'_, AppState>) -> Result<costs::Month
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let config_parser = Arc::new(ConfigParser::default_location());
             if !config_parser.exists() {
@@ -835,12 +856,15 @@ pub fn run() {
                 db,
                 buckets,
                 primary_lifecycle: tokio::sync::Mutex::new(()),
+                update_installation: tokio::sync::Mutex::new(()),
                 site_publication: tokio::sync::Mutex::new(()),
             });
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updater::check_app_update,
+            updater::install_app_update,
             get_config,
             save_config,
             validate_config,

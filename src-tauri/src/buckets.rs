@@ -72,6 +72,7 @@ pub(crate) struct BucketCatalog {
     app_dir: PathBuf,
     configuration: Mutex<()>,
     runtimes: Mutex<HashMap<i64, Arc<BucketRuntime>>>,
+    pub(crate) lifecycle: tokio::sync::RwLock<()>,
 }
 
 impl BucketCatalog {
@@ -88,6 +89,7 @@ impl BucketCatalog {
             app_dir,
             configuration: Mutex::new(()),
             runtimes: Mutex::new(HashMap::new()),
+            lifecycle: tokio::sync::RwLock::new(()),
         })
     }
 
@@ -204,6 +206,7 @@ impl BucketCatalog {
         parser: &ConfigParser,
         credentials: &CredentialsManager,
     ) -> Result<(), String> {
+        let _catalog = self.lifecycle.read().await;
         let profile = self.profile(id)?;
         let runtime = self.runtime(&profile)?;
         let _lifecycle = runtime.lifecycle.lock().await;
@@ -240,6 +243,14 @@ impl BucketCatalog {
         .await;
         *runtime.error.lock().unwrap() = result.as_ref().err().cloned();
         result
+    }
+
+    pub(crate) async fn stop_for_update(&self) -> Result<(), String> {
+        let runtimes: Vec<_> = self.runtimes.lock().unwrap().values().cloned().collect();
+        for runtime in runtimes {
+            runtime.engine.stop().await.map_err(|err| err.to_string())?;
+        }
+        Ok(())
     }
 
     pub(crate) fn restore_enabled(
@@ -680,9 +691,21 @@ mod tests {
         assert!(second.engine.is_running());
         first.engine.start().await.unwrap();
         assert!(first.engine.is_running());
-        let (first_stopped, second_stopped) =
-            tokio::join!(first.engine.stop(), second.engine.stop());
-        first_stopped.unwrap();
-        second_stopped.unwrap();
+        catalog
+            .db
+            .connection()
+            .lock()
+            .unwrap()
+            .execute("UPDATE bucket_profiles SET enabled = 1", [])
+            .unwrap();
+        let _lifecycle = catalog.lifecycle.write().await;
+        catalog.stop_for_update().await.unwrap();
+        assert!(!first.engine.is_running());
+        assert!(!second.engine.is_running());
+        assert!(catalog
+            .profiles()
+            .unwrap()
+            .iter()
+            .all(|profile| profile.enabled));
     }
 }

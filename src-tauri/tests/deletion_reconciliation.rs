@@ -1,6 +1,6 @@
 use amazon_s3_drive_lib::{
     db::Database,
-    models::{AppConfig, FileEntry, LocalFsEvent, SyncState},
+    models::{AppConfig, FileEntry, LocalFsEvent, SyncOperation, SyncOperationType, SyncState},
     network_detector::NetworkDetector,
     queue_manager::QueueManager,
     s3_client::{compute_md5_bytes, MockObject, MockS3Backend, S3Client},
@@ -44,6 +44,10 @@ impl Fixture {
         }
     }
     fn engine(&self) -> Arc<SyncEngine> {
+        self.engine_with_network(NetworkDetector::new())
+    }
+
+    fn engine_with_network(&self, network: NetworkDetector) -> Arc<SyncEngine> {
         let db = Database::new(&self.dir.path().join("state.sqlite")).unwrap();
         Arc::new(
             SyncEngine::new(
@@ -52,7 +56,7 @@ impl Fixture {
                 db.clone(),
                 Arc::new(QueueManager::new(&db)),
                 Arc::new(StatusMonitor::default()),
-                NetworkDetector::new(),
+                network,
                 Arc::new(RecordingEmitter::default()),
             )
             .with_retry_policy(RetryPolicy::fast_for_tests()),
@@ -88,6 +92,79 @@ impl Fixture {
             })
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn queued_deletion_keeps_the_approved_etag_across_restart() {
+    for changed in [false, true] {
+        let mut f = Fixture::new();
+        f.config.sync_direction = "UploadOnly".into();
+        f.synced();
+        let network = NetworkDetector::new();
+        network.set_online(false);
+        let engine = f.engine_with_network(network);
+        engine
+            .delete_file_and_sync("documents/test.txt")
+            .await
+            .unwrap();
+        let pending = engine.queue_manager().get_all_pending_ordered().unwrap();
+        assert_eq!(
+            pending[0].operation.extra.as_deref(),
+            Some(compute_md5_bytes(b"original").as_str())
+        );
+        drop(engine);
+        if changed {
+            f.remote_write(b"new version");
+        }
+
+        let restarted = f.engine();
+        restarted.poll_remote_changes().await.unwrap();
+        restarted.process_queue().await.unwrap();
+        restarted.poll_remote_changes().await.unwrap();
+
+        if changed {
+            assert_eq!(
+                f.remote.lock().unwrap().objects["documents/test.txt"].bytes,
+                b"new version"
+            );
+            let review = restarted.deletion_reviews().unwrap().remove(0);
+            assert!(review.queued && review.other_side_changed);
+            restarted.resolve_deletion(&review, true).await.unwrap();
+            assert_eq!(fs::read(f.local()).unwrap(), b"new version");
+        } else {
+            assert!(!f
+                .remote
+                .lock()
+                .unwrap()
+                .objects
+                .contains_key("documents/test.txt"));
+            assert!(restarted.deletion_reviews().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_delete_without_etag_goes_to_review() {
+    let f = Fixture::new();
+    f.remote_write(b"remote version");
+    let engine = f.engine();
+    engine
+        .queue_manager()
+        .enqueue(SyncOperation {
+            operation_type: SyncOperationType::Delete,
+            s3_key: "documents/test.txt".into(),
+            local_path: f.local().to_string_lossy().into_owned(),
+            extra: None,
+        })
+        .unwrap();
+    engine.process_queue().await.unwrap();
+    assert!(f
+        .remote
+        .lock()
+        .unwrap()
+        .objects
+        .contains_key("documents/test.txt"));
+    assert!(engine.deletion_reviews().unwrap()[0].queued);
 }
 
 #[tokio::test]

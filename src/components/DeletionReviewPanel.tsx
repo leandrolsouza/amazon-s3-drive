@@ -45,7 +45,7 @@ export function DeletionReviewPanel({ bucketId, paused = false }: { bucketId?: n
     {error && <p role="alert">{error}</p>}
     <ul>{reviews.map((item) => <li key={item.s3_key}>
       <p>{item.s3_key} — excluído {item.deleted_side === "local" ? "no computador" : "no S3"}.
-        {item.other_side_changed && " Conflito: a outra versão foi editada."}</p>
+        {item.queued ? " Confirme a revisão remota antes de excluir." : item.other_side_changed && " Conflito: a outra versão foi editada."}</p>
       <button disabled={busy || paused} onClick={() => void resolve([item], true)}>Restaurar arquivo</button>{" "}
       <button disabled={busy || paused} onClick={() => void resolve([item], false)}>Confirmar exclusão</button>
     </li>)}</ul>

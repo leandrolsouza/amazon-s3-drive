@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+
+  installers:
+    needs: tests
+    name: Installers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      # Each job updates the same latest.json asset on the draft release.
+      max-parallel: 1
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            bundles: appimage,deb
+          - os: windows-latest
+            bundles: msi,nsis
+          - os: macos-latest
+            bundles: dmg
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Check release version
+        run: |
+          node -e '
+            const { version } = require("./src-tauri/tauri.conf.json");
+            const tag = process.env.GITHUB_REF_NAME;
+            if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version) || tag !== `v${version}`) {
+              throw new Error(`Expected a vMAJOR.MINOR.PATCH tag matching the Tauri version (${version}); got ${tag}`);
+            }
+          '
+        shell: bash
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev patchelf xdg-utils
+
+      - run: rustup update stable
+      - run: npm ci
+
+      - name: Configure signed updater
+        env:
+          UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          node -e '
+            const key = process.env.UPDATER_PUBLIC_KEY?.trim();
+            if (!key) throw new Error("Set the TAURI_UPDATER_PUBLIC_KEY repository variable");
+            const fs = require("node:fs");
+            const path = "src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(path, "utf8"));
+            config.plugins.updater.pubkey = key;
+            config.bundle.createUpdaterArtifacts = true;
+            fs.writeFileSync(path, JSON.stringify(config, null, 2));
+          '
+        shell: bash
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RUSTUP_TOOLCHAIN: stable
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseDraft: true
+          generateReleaseNotes: true
+          retryAttempts: 2
+          args: --bundles ${{ matrix.bundles }} -- --locked

@@ -500,7 +500,7 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
             <div className="prop-label-col">
               <label htmlFor="endpoint_url">Endpoint S3 Customizado</label>
               <span className="prop-sub">
-                Opcional (Cloudflare R2, MinIO, Backblaze B2)
+                Opcional. Use HTTPS. HTTP é aceito apenas em IPs de loopback, como 127.0.0.1.
               </span>
             </div>
             <div className="prop-control-col">

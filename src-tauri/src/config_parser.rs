@@ -3,6 +3,37 @@ use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub(crate) const S3_ENDPOINT_ERROR: &str =
+    "Use um endpoint S3 HTTPS. HTTP só é permitido para endereços IP de loopback, como 127.0.0.1.";
+
+pub(crate) fn parse_s3_endpoint(endpoint: Option<&str>) -> Result<Option<reqwest::Url>, ()> {
+    let Some(endpoint) = endpoint.map(str::trim).filter(|url| !url.is_empty()) else {
+        return Ok(None);
+    };
+    let url = reqwest::Url::parse(endpoint).map_err(|_| ())?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(());
+    }
+    let loopback = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|ip| ip.is_loopback());
+    match url.scheme() {
+        "https" => Ok(Some(url)),
+        "http" if loopback => Ok(Some(url)),
+        _ => Err(()),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigParser {
     path: PathBuf,
@@ -32,8 +63,8 @@ impl ConfigParser {
         let bytes = fs::read(&self.path).map_err(|e| ConfigError::Io(e.to_string()))?;
         let content =
             String::from_utf8(bytes).map_err(|e| ConfigError::InvalidUtf8(e.to_string()))?;
-        let mut config: AppConfig =
-            serde_json::from_str(&content).map_err(|e| ConfigError::MalformedJson(e.to_string()))?;
+        let mut config: AppConfig = serde_json::from_str(&content)
+            .map_err(|e| ConfigError::MalformedJson(e.to_string()))?;
         // Requisito 10.4: notificações de erro sempre habilitadas
         config.notifications.error_enabled = true;
         Ok(config)
@@ -101,29 +132,24 @@ impl ConfigParser {
             if !region_re.is_match(region_trimmed) {
                 errors.push(ValidationError {
                     field: "aws_region".to_string(),
-                    reason: "Formato de região AWS inválido (ex: us-east-1, sa-east-1).".to_string(),
-                });
-            }
-        }
-
-        if let Some(ref ep) = config.endpoint_url {
-            let ep_trimmed = ep.trim();
-            if !ep_trimmed.is_empty()
-                && !ep_trimmed.starts_with("http://")
-                && !ep_trimmed.starts_with("https://")
-            {
-                errors.push(ValidationError {
-                    field: "endpoint_url".to_string(),
-                    reason: "O Endpoint S3 customizado deve iniciar com http:// ou https://."
+                    reason: "Formato de região AWS inválido (ex: us-east-1, sa-east-1)."
                         .to_string(),
                 });
             }
         }
 
+        if parse_s3_endpoint(config.endpoint_url.as_deref()).is_err() {
+            errors.push(ValidationError {
+                field: "endpoint_url".to_string(),
+                reason: S3_ENDPOINT_ERROR.into(),
+            });
+        }
+
         if config.sync_interval_secs == 0 || config.sync_interval_secs > 60 {
             errors.push(ValidationError {
                 field: "sync_interval_secs".to_string(),
-                reason: "O intervalo de sincronização deve estar entre 1 e 60 segundos.".to_string(),
+                reason: "O intervalo de sincronização deve estar entre 1 e 60 segundos."
+                    .to_string(),
             });
         }
 
@@ -264,6 +290,26 @@ mod tests {
         match err {
             ConfigError::InvalidUtf8(msg) => assert!(!msg.is_empty()),
             other => panic!("Expected InvalidUtf8, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accepts_https_and_only_literal_loopback_over_http() {
+        for url in [
+            "https://s3.example.com",
+            "http://127.0.0.1:9000",
+            "http://[::1]:9000",
+        ] {
+            assert!(parse_s3_endpoint(Some(url)).is_ok());
+        }
+        for url in [
+            "http://s3.example.com",
+            "http://192.168.1.2:9000",
+            "http://localhost:9000",
+            "https://name@s3.example.com",
+            "https://s3.example.com/?query=1",
+        ] {
+            assert!(parse_s3_endpoint(Some(url)).is_err());
         }
     }
 

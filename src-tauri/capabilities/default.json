@@ -4,12 +4,8 @@
   "description": "Default capabilities for Amazon S3 Drive",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "core:tray:default",
-    "core:path:default",
-    "core:event:default",
-    "core:window:default",
-    "core:menu:default",
-    "core:image:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-main-commands"
   ]
 }

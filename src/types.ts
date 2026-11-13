@@ -182,5 +182,6 @@ export interface DeletionReview {
   deleted_side: "local" | "remote";
   other_side_changed: boolean;
   remote_etag: string | null;
+  queued?: boolean;
   local_hash: string | null;
 }
