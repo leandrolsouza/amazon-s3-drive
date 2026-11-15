@@ -7,6 +7,8 @@ import { DeletionReviewPanel } from "./components/DeletionReviewPanel";
 import { useSyncEvents } from "./hooks/useSyncEvents";
 import { ConfigurationPage } from "./pages/ConfigurationPage";
 import { BucketsPage } from "./pages/BucketsPage";
+import { Button } from "./components/ui/Button";
+import { WindowTitleBar } from "./components/WindowTitleBar";
 import { Icon } from "./components/Icon";
 import { StorageView } from "./pages/StorageView";
 import { SiteView } from "./pages/SiteView";
@@ -19,13 +21,14 @@ import { AppConfig } from "./types";
 import { runSyncCommand } from "./syncCommands";
 import { initializeLocale, locale, t } from "./i18n";
 
-export const App: React.FC = () => {
+export const App: React.FC<{ windowsTitleBar?: boolean }> = ({ windowsTitleBar = false }) => {
   useSyncEvents();
 
   const [activeTab, setActiveTab] = useState<"config" | "status" | "logs" | "storage" | "sites" | "buckets">(
     useSyncStore.getState().config?.bucket_name.trim() && useSyncStore.getState().config?.local_path.trim() ? "status" : "config"
   );
   const [sitesVisited, setSitesVisited] = useState(false);
+  const [statusVisited, setStatusVisited] = useState(false);
   const [configLoaded, setConfigLoaded] = useState(() => useSyncStore.getState().config !== null);
   const [configLoadError, setConfigLoadError] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -50,6 +53,10 @@ export const App: React.FC = () => {
   const queueStats = useSyncStore((s) => s.queueStats);
   const conflicts = useSyncStore((s) => s.conflicts);
   const errors = useSyncStore((s) => s.errors);
+
+  useEffect(() => {
+    if (activeTab === "status" && configLoaded) setStatusVisited(true);
+  }, [activeTab, configLoaded]);
 
   useEffect(() => {
     if (configLoaded) return;
@@ -179,12 +186,27 @@ export const App: React.FC = () => {
   const alertCount =
     conflicts.length + errors.filter((e) => e.retry_count >= 3).length;
 
+  const navigation: {
+    tab: typeof activeTab;
+    label: string;
+    icon: React.ComponentProps<typeof Icon>["name"];
+    count?: number;
+  }[] = [
+    { tab: "status", label: t("Files"), icon: "list", count: fileStatuses.length },
+    { tab: "buckets", label: "Buckets", icon: "bucket" },
+    { tab: "storage", label: t("Storage"), icon: "chart" },
+    { tab: "sites", label: "Sites", icon: "link" },
+    { tab: "config", label: t("Settings"), icon: "settings", count: alertCount || undefined },
+    { tab: "logs", label: t("Logs & Diagnostics"), icon: "terminal", count: errors.length || undefined },
+  ];
+
   return (
     <div className="desktop-frame">
+      {windowsTitleBar && <WindowTitleBar />}
       <div className="desktop-body">
         {/* Sidebar Utilitária Compacta */}
         <aside className="sidebar">
-          <div className="sidebar-brand">
+          {!windowsTitleBar && <div className="sidebar-brand">
             <div className="s3-mark" aria-hidden="true">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                 <path
@@ -204,119 +226,30 @@ export const App: React.FC = () => {
             <div className="sidebar-brand-title">
               <h1>Amazon S3 Drive</h1>
             </div>
-          </div>
+          </div>}
 
-          <div className="sidebar-group-label">WORKSPACE</div>
           <nav className="sidebar-nav" aria-label={t("Main navigation")}>
-            <button
-              type="button"
-              className={activeTab === "buckets" ? "sidebar-link nav-active" : "sidebar-link"}
-              aria-current={activeTab === "buckets" ? "page" : undefined}
-              onClick={() => setActiveTab("buckets")}
-            >
-              <span className="sidebar-link-main">Buckets</span>
-            </button>
-            <button
-              type="button"
-              className={`sidebar-link ${
-                activeTab === "status" ? "nav-active" : ""
-              }`}
-              onClick={() => setActiveTab("status")}
-            >
-              <span className="sidebar-link-main">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                >
-                  <path d="M3 6h18M3 12h18M3 18h18" />
-                </svg>
-                <span>{t("Sync Status")}</span>
-              </span>
-              <span className="sidebar-counter">{fileStatuses.length}</span>
-            </button>
-
-            <button
-              type="button"
-              className={activeTab === "storage" ? "sidebar-link nav-active" : "sidebar-link"}
-              aria-current={activeTab === "storage" ? "page" : undefined}
-              onClick={() => setActiveTab("storage")}
-            >
-              <span className="sidebar-link-main">
-                <Icon name="chart" />
-                <span>{t("Storage")}</span>
-              </span>
-            </button>
-
-            <button
-              type="button"
-              className={activeTab === "sites" ? "sidebar-link nav-active" : "sidebar-link"}
-              aria-current={activeTab === "sites" ? "page" : undefined}
-              onClick={() => { setSitesVisited(true); setActiveTab("sites"); }}
-            >
-              <span className="sidebar-link-main">
-                <Icon name="link" />
-                <span>Sites</span>
-              </span>
-            </button>
-
-            <button
-              type="button"
-              className={`sidebar-link ${
-                activeTab === "config" ? "nav-active" : ""
-              }`}
-              onClick={() => setActiveTab("config")}
-            >
-              <span className="sidebar-link-main">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                >
-                  <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
-                </svg>
-                <span>{t("Settings")}</span>
-              </span>
-              {alertCount > 0 && (
-                <span className="sidebar-counter counter-alert">
-                  {alertCount}
+            {navigation.map(({ tab, label, icon, count }) => (
+              <Button
+                key={tab}
+                variant="navigation"
+                aria-current={activeTab === tab ? "page" : undefined}
+                onClick={() => {
+                  if (tab === "sites") setSitesVisited(true);
+                  setActiveTab(tab);
+                }}
+              >
+                <span className="flex min-w-0 items-center gap-2.5">
+                  <Icon name={icon} />
+                  <span>{label}</span>
                 </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              className={`sidebar-link ${
-                activeTab === "logs" ? "nav-active" : ""
-              }`}
-              onClick={() => setActiveTab("logs")}
-            >
-              <span className="sidebar-link-main">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                >
-                  <polyline points="4 17 10 11 4 5" />
-                  <line x1="12" y1="19" x2="20" y2="19" />
-                </svg>
-                <span>{t("Logs & Diagnostics")}</span>
-              </span>
-              {errors.length > 0 && (
-                <span className="sidebar-counter counter-alert">
-                  {errors.length}
-                </span>
-              )}
-            </button>
+                {count !== undefined && (
+                  <span className={tab === "status" ? "sidebar-counter" : "sidebar-counter counter-alert"}>
+                    {count}
+                  </span>
+                )}
+              </Button>
+            ))}
           </nav>
 
           <div className="sidebar-group-label">{t("PRIMARY BUCKET")}</div>
@@ -341,24 +274,10 @@ export const App: React.FC = () => {
             </div>
 
             {config?.local_path && (
-              <button
-                type="button"
-                className="sidebar-open-dir-btn"
-                onClick={handleOpenLocalFolder}
-                title={config.local_path}
-              >
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                >
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                </svg>
+              <Button className="mt-2 w-full" onClick={handleOpenLocalFolder} title={config.local_path}>
+                <Icon name="folder" />
                 <span>{t("Open Local Folder")}</span>
-              </button>
+              </Button>
             )}
           </div>
 
@@ -418,6 +337,15 @@ export const App: React.FC = () => {
                   <SiteView active={activeTab === "sites"} />
                 </div>
               )}
+              {(statusVisited || activeTab === "status") && (
+                <div className="status-workspace" hidden={activeTab !== "status"}>
+                  <StatusView
+                    key={JSON.stringify([config?.bucket_name, config?.local_path, config?.s3_prefix, config?.aws_region, config?.endpoint_url])}
+                    active={activeTab === "status"}
+                    onOpenSettings={() => setActiveTab("config")}
+                  />
+                </div>
+              )}
               {activeTab === "buckets" ? (
               <BucketsPage config={config} primaryStatus={presentation.text}
                 onOpenPrimary={() => setActiveTab("status")} onOpenConfig={() => setActiveTab("config")} />
@@ -425,8 +353,6 @@ export const App: React.FC = () => {
               <StorageView />
             ) : activeTab === "logs" ? (
               <LogsView />
-            ) : activeTab === "status" ? (
-              <StatusView />
             ) : null}
             </>}
           </main>

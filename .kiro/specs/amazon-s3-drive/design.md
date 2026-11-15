@@ -25,6 +25,18 @@ O Amazon S3 Drive é uma aplicação desktop cross-platform construída com **Ta
 
 ## Architecture
 
+No Windows, a janela principal usa uma barra de título integrada à interface. A região do título permite arrastar e alternar maximização por duplo clique. Os botões de minimizar, maximizar, restaurar e fechar usam os comandos de janela do Tauri autorizados para a janela principal. Nas demais plataformas, o sistema desenha a barra de título.
+
+### Espaço de trabalho de arquivos
+
+Quem acompanha uma pasta sincronizada configura o bucket e a pasta local, localiza um arquivo, confere seu estado e abre os detalhes ou age sobre ele. O bucket e a pasta em navegação dão contexto à lista. O envio aparece em destaque quando a configuração permite importar arquivos. A confirmação revisa o destino e a conclusão informa que os arquivos foram importados para sincronização. A lista apresenta o progresso e o estado efetivo de cada arquivo.
+
+A tela preserva pasta, busca, filtros, seleção e detalhes ao alternar entre seções na mesma janela. Trocar o destino configurado reinicia esse contexto. Uma busca sem resultados permite limpar os filtros no lugar. O inspetor distingue carregamento, falha e ausência de versões, com nova tentativa no próprio painel.
+
+A navegação desktop usa Tailwind CSS e um componente local de botão adaptado do shadcn/ui. O Preflight fica desativado para preservar os estilos das telas existentes.
+
+O plugin de estado do Tauri restaura tamanho, posição e maximização da janela principal. A configuração do Windows aplica Mica pela integração do Tauri com `window-vibrancy` quando o sistema oferece o efeito. A barra lateral tem fundo tonalizado, enquanto o painel de trabalho e a barra de status usam fundos opacos.
+
 ### Diagrama de Componentes
 
 ```mermaid

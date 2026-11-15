@@ -2,8 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncStore } from "../store";
 import { t, locale } from "../i18n";
+import type { AppConfig } from "../types";
 
 const NEW_FOLDER = "/";
+
+export function canImportFiles(config: AppConfig | null) {
+  return Boolean(config?.bucket_name.trim() && config.local_path.trim()) &&
+    config?.sync_direction?.toLowerCase() !== "downloadonly";
+}
 
 interface Props {
   currentFolder: string;
@@ -55,8 +61,7 @@ export function UploadDialog({ currentFolder, initialPaths, onCancel, onImported
     part.length > 0 && part === part.trim() && !part.endsWith(".") && !/[<>:"\\|?*]/.test(part),
   );
   const destination = [prefix, targetFolder].filter(Boolean).join("/");
-  const canUpload = Boolean(config?.bucket_name.trim() && config.local_path.trim()) &&
-    config?.sync_direction?.toLowerCase() !== "downloadonly";
+  const canUpload = canImportFiles(config);
 
   async function chooseFiles() {
     setPending("selecting");
@@ -93,7 +98,7 @@ export function UploadDialog({ currentFolder, initialPaths, onCancel, onImported
     <dialog ref={dialog} className="delete-confirmation upload-dialog" aria-labelledby="upload-title"
       onCancel={(event) => { event.preventDefault(); if (!pending) onCancel(); }}>
       <h2 id="upload-title">{t("Upload files")}</h2>
-      <div className="upload-fields">
+      <div className="upload-fields" aria-busy={pending === "importing"}>
         <label htmlFor="upload-folder">{t("Destination folder")}</label>
         <select id="upload-folder" value={folder} disabled={Boolean(pending)} onChange={(event) => setFolder(event.target.value)}>
           <option value="">{t("Sync root")}</option>
@@ -125,6 +130,7 @@ export function UploadDialog({ currentFolder, initialPaths, onCancel, onImported
         {!canUpload && <p role="status">{t("Configure a destination with uploads enabled to continue.")}</p>}
         {error && <p role="alert" className="field-error">{error}</p>}
       </div>
+      {pending === "importing" && <p role="status">{t("Importing files into the local sync folder…")}</p>}
       <div className="upload-actions">
         <button type="button" className="btn-compact" disabled={Boolean(pending)} onClick={onCancel}>{t("Cancel")}</button>
         <button type="button" className="btn-primary-compact" disabled={!canUpload || !validFolder || !paths.length || Boolean(pending)} onClick={upload}>

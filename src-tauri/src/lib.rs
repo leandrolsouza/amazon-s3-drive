@@ -809,7 +809,14 @@ async fn get_s3_monthly_spend(state: State<'_, AppState>) -> Result<costs::Month
 }
 
 pub fn run() {
+    use tauri_plugin_window_state::StateFlags;
+
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let config_parser = Arc::new(ConfigParser::default_location());

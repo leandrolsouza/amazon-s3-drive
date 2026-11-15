@@ -24,6 +24,43 @@ describe("UI state and recovery", () => {
     vi.mocked(invoke).mockReset().mockResolvedValue(null);
   });
 
+  it("keeps the current folder, filter and inspected object across workspace navigation", async () => {
+    const files = [
+      { path: "docs/first.txt", state: { type: "Synced" }, last_modified: null, size_bytes: 10 },
+      { path: "docs/second.txt", state: { type: "Synced" }, last_modified: null, size_bytes: 20 },
+    ];
+    useSyncStore.getState().setConfig(config);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "get_sync_running") return true;
+      if (command === "get_sync_status") return files;
+      if (command === "get_object_details") return { local_path: "/test/docs/first.txt", size_bytes: 10 };
+      if (command === "list_object_versions") return [];
+      return null;
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Abrir Pasta" }));
+    const search = screen.getByRole("textbox", { name: "Filtrar arquivos" });
+    fireEvent.change(search, { target: { value: "missing" } });
+    expect(screen.getByText("Nenhum arquivo corresponde a esses filtros.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Limpar filtros" }));
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: "Inspecionar first.txt" }));
+    const inspector = screen.getByRole("complementary", { name: "Inspector de Objeto" });
+    expect(await within(inspector).findByText("/test/docs/first.txt")).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("get_object_details", { s3Key: "docs/first.txt" });
+
+    const navigation = screen.getByRole("navigation", { name: /navegação principal/i });
+    fireEvent.click(within(navigation).getByRole("button", { name: "Configurações" }));
+    expect(screen.queryByRole("textbox", { name: "Filtrar arquivos" })).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(within(navigation).getByRole("button", { name: /^Arquivos/ })); });
+    expect(screen.getByRole("textbox", { name: "Filtrar arquivos" })).toHaveValue("first");
+    expect(screen.getByRole("button", { name: "docs" })).toHaveAttribute("aria-current", "location");
+    expect(within(screen.getByRole("complementary", { name: "Inspector de Objeto" })).getByText("/test/docs/first.txt")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-item-docs/second.txt")).not.toBeInTheDocument();
+  });
+
   it("does not report ready before configuration or while stopped", () => {
     const label = () => syncPresentation(useSyncStore.getState()).text;
     expect(label()).toBe("Não configurado");
@@ -146,7 +183,7 @@ describe("Startup and draft navigation", () => {
   it("opens synchronization after loading a saved configuration", async () => {
     vi.mocked(invoke).mockImplementation(async (command) => command === "get_config" ? config : command === "get_sync_running" ? false : []);
     render(<StrictMode><App /></StrictMode>);
-    await screen.findByRole("heading", { name: "Objetos & Transferências" });
+    await screen.findByRole("heading", { name: "Arquivos e transferências" });
     expect(screen.queryByRole("heading", { name: "Preferências do Sistema" })).not.toBeInTheDocument();
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_sync"));
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "start_sync")).toHaveLength(1);

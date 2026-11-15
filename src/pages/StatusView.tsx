@@ -1,6 +1,7 @@
-import { UploadDialog } from "../components/UploadDialog";
+import { canImportFiles, UploadDialog } from "../components/UploadDialog";
 import { Icon } from "../components/Icon";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSyncStore } from "../store";
@@ -134,7 +135,13 @@ function splitPath(fullPath: string): { dir: string; base: string } {
   };
 }
 
-export const StatusView: React.FC = () => {
+export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => void }> = ({
+  active = true,
+  onOpenSettings,
+}) => {
+  const config = useSyncStore((s) => s.config);
+  const configured = Boolean(config?.bucket_name.trim() && config.local_path.trim());
+  const canUpload = canImportFiles(config);
   const fileStatuses = useSyncStore((s) => s.fileStatuses);
   const transferProgress = useSyncStore((s) => s.transferProgress);
   const badge = syncPresentation(useSyncStore());
@@ -148,6 +155,7 @@ export const StatusView: React.FC = () => {
   const setQueueStats = useSyncStore((s) => s.setQueueStats);
 
   const [searchQuery, setSearchQuery] = useState("");
+  const searchInput = useRef<HTMLInputElement>(null);
   const [stateFilter, setStateFilter] = useState<
     "ALL" | "Synced" | "Active" | "Error"
   >("ALL");
@@ -159,6 +167,9 @@ export const StatusView: React.FC = () => {
   const [selectedMetadata, setSelectedMetadata] =
     useState<ObjectDetailedMetadata | null>(null);
   const [objectVersions, setObjectVersions] = useState<S3ObjectVersion[]>([]);
+  const [detailsState, setDetailsState] = useState<"loading" | "error" | "ready">("loading");
+  const [versionsState, setVersionsState] = useState<"loading" | "error" | "ready">("loading");
+  const [inspectAttempt, setInspectAttempt] = useState(0);
   const [presignExpirySecs, setPresignExpirySecs] = useState<number>(3600);
   const [generatedPresignedUrl, setGeneratedPresignedUrl] = useState<
     string | null
@@ -183,6 +194,7 @@ export const StatusView: React.FC = () => {
   }, [actionFeedback]);
 
   useEffect(() => {
+    if (!active) return;
     let disposed = false;
     invoke<FileStatus[]>("get_sync_status")
       .then((statuses) => {
@@ -200,71 +212,73 @@ export const StatusView: React.FC = () => {
       })
       .catch(() => {});
     return () => { disposed = true; };
-  }, [setFileStatuses, setQueueStats, syncRunning]);
+  }, [active, setFileStatuses, setQueueStats, syncRunning]);
 
   useEffect(() => {
-    let unlistenDrop: (() => void) | undefined;
-    let unlistenEnter: (() => void) | undefined;
-    let unlistenLeave: (() => void) | undefined;
+    if (!active || !canUpload) {
+      setIsDragOver(false);
+      return;
+    }
+    let disposed = false;
+    const cleanups: (() => void)[] = [];
+    const track = (subscription: Promise<() => void>) => {
+      void subscription.then((unlisten) => {
+        if (disposed) unlisten();
+        else cleanups.push(unlisten);
+      }).catch(() => {});
+    };
 
-    listen<{ paths?: string[] }>("tauri://drag-drop", (ev) => {
+    track(listen<{ paths?: string[] }>("tauri://drag-drop", (ev) => {
       setIsDragOver(false);
       const droppedPaths = ev.payload?.paths;
       if (Array.isArray(droppedPaths) && droppedPaths.length > 0) {
         setUploadPaths((open) => open ?? droppedPaths);
       }
-    })
-      .then((fn) => {
-        unlistenDrop = fn;
-      })
-      .catch(() => {});
-
-    listen("tauri://drag-enter", () => setIsDragOver(true))
-      .then((fn) => {
-        unlistenEnter = fn;
-      })
-      .catch(() => {});
-
-    listen("tauri://drag-leave", () => setIsDragOver(false))
-      .then((fn) => {
-        unlistenLeave = fn;
-      })
-      .catch(() => {});
+    }));
+    track(listen("tauri://drag-enter", () => setIsDragOver(true)));
+    track(listen("tauri://drag-leave", () => setIsDragOver(false)));
 
     return () => {
-      unlistenDrop?.();
-      unlistenEnter?.();
-      unlistenLeave?.();
+      disposed = true;
+      cleanups.forEach((unlisten) => unlisten());
     };
-  }, [currentFolder]);
+  }, [active, canUpload]);
 
   useEffect(() => {
+    setGeneratedPresignedUrl(null);
+    setRenameTargetKey(selectedFileKey ?? "");
+  }, [selectedFileKey]);
+
+  useEffect(() => {
+    setSelectedMetadata(null);
+    setObjectVersions([]);
     if (!selectedFileKey) {
-      setSelectedMetadata(null);
-      setObjectVersions([]);
-      setGeneratedPresignedUrl(null);
-      setRenameTargetKey("");
       return;
     }
-    setGeneratedPresignedUrl(null);
-    setObjectVersions([]);
-    setRenameTargetKey(selectedFileKey);
+    let disposed = false;
+    setDetailsState("loading");
+    setVersionsState("loading");
     invoke<ObjectDetailedMetadata>("get_object_details", {
       s3Key: selectedFileKey,
     })
       .then((meta) => {
-        if (meta) setSelectedMetadata(meta);
+        if (disposed) return;
+        setSelectedMetadata(meta);
+        setDetailsState(meta ? "ready" : "error");
       })
-      .catch(() => {});
+      .catch(() => { if (!disposed) setDetailsState("error"); });
 
     invoke<S3ObjectVersion[]>("list_object_versions", {
       s3Key: selectedFileKey,
     })
       .then((vers) => {
+        if (disposed) return;
         if (Array.isArray(vers)) setObjectVersions(vers);
+        setVersionsState(Array.isArray(vers) ? "ready" : "error");
       })
-      .catch(() => {});
-  }, [selectedFileKey]);
+      .catch(() => { if (!disposed) setVersionsState("error"); });
+    return () => { disposed = true; };
+  }, [selectedFileKey, inspectAttempt]);
 
   const counts = useMemo(() => {
     const total = fileStatuses.length;
@@ -514,6 +528,13 @@ export const StatusView: React.FC = () => {
 
   const visibleFileRows =
     viewMode === "tree" ? treeEntries.files : filteredFiles;
+  const hasFilters = Boolean(searchQuery.trim()) || stateFilter !== "ALL";
+  const noResults = filteredFiles.length === 0 && (hasFilters || Boolean(currentFolder));
+  const clearFilters = () => {
+    setSearchQuery("");
+    setStateFilter("ALL");
+    searchInput.current?.focus();
+  };
 
   const allVisibleSelected =
     visibleFileRows.length > 0 &&
@@ -617,7 +638,7 @@ export const StatusView: React.FC = () => {
 
   return (
     <div className="pane-container">
-      {uploadPaths && (
+      {uploadPaths && createPortal(
         <UploadDialog
           currentFolder={currentFolder}
           initialPaths={uploadPaths}
@@ -626,18 +647,25 @@ export const StatusView: React.FC = () => {
             setUploadPaths(null);
             setActionFeedback({ type: "ok", text: t("{0} file(s) imported for sync.", count) });
           }}
-        />
+        />, document.body
       )}
-      {pendingDelete && <DeleteConfirmation keysToDelete={pendingDelete} busy={deleting} failed={deleteError} onCancel={() => setPendingDelete(null)} onConfirm={handleConfirmDelete} />}
-      {/* Top Command Bar (Estilo Linear / Panic Transmit) */}
-      <header className="command-bar">
+      {pendingDelete && createPortal(
+        <DeleteConfirmation keysToDelete={pendingDelete} busy={deleting} failed={deleteError} onCancel={() => setPendingDelete(null)} onConfirm={handleConfirmDelete} />,
+        document.body,
+      )}
+      <header className="command-bar object-command-bar">
         <div className="command-bar-left">
-          <h2 className="pane-title">{t("Objects & Transfers")}</h2>
-          <div
-            data-testid="global-state-badge"
-            className={`state-tag mono ${badge.badgeClass}`}
-          >
-            {badge.text}
+          <h2 className="pane-title">{t("Files & Transfers")}</h2>
+          <div className="object-heading-actions">
+            <div data-testid="global-state-badge" role="status" className={`state-tag mono ${badge.badgeClass}`}>
+              {badge.text}
+            </div>
+            {canUpload && (
+              <button type="button" className="btn-primary-compact" onClick={() => setUploadPaths([])}>
+                <Icon name="upload" />
+                {t("Upload files")}
+              </button>
+            )}
           </div>
         </div>
 
@@ -655,6 +683,7 @@ export const StatusView: React.FC = () => {
               <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
             <input
+              ref={searchInput}
               type="text"
               placeholder={t("Filter S3 keys...")}
               value={searchQuery}
@@ -681,6 +710,7 @@ export const StatusView: React.FC = () => {
                 className={`seg-btn ${
                   stateFilter === item.id ? "seg-active" : ""
                 }`}
+                aria-pressed={stateFilter === item.id}
                 onClick={() => setStateFilter(item.id)}
               >
                 {item.label}
@@ -743,16 +773,6 @@ export const StatusView: React.FC = () => {
           <button
             type="button"
             className="btn-compact toolbar-icon"
-            aria-label={t("Upload files")}
-            onClick={() => setUploadPaths([])}
-            title={t("Import and upload files to the current folder")}
-          >
-            <Icon name="upload" />
-          </button>
-
-          <button
-            type="button"
-            className="btn-compact toolbar-icon"
             aria-label={t("Start")}
             onClick={handleSyncNow}
             disabled={syncAction !== null}
@@ -776,7 +796,7 @@ export const StatusView: React.FC = () => {
       {showNewFolderInput && (
         <div className="new-folder-bar">
           <span className="mono new-folder-prefix">
-            s3://root/{currentFolder}
+            {config?.bucket_name ? `s3://${config.bucket_name}/${currentFolder}` : t("Sync root")}
           </span>
           <input
             type="text"
@@ -872,16 +892,17 @@ export const StatusView: React.FC = () => {
         </div>
       )}
 
-      {viewMode === "tree" && (
-        <div className="breadcrumb-bar mono">
-          <button
+      {(viewMode === "tree" || config?.bucket_name) && (
+        <nav className="breadcrumb-bar mono" aria-label={t("Current location")}>
+          {viewMode === "tree" ? <button
             type="button"
             className={`crumb-btn ${!currentFolder ? "crumb-active" : ""}`}
+            aria-current={!currentFolder ? "location" : undefined}
             onClick={() => setCurrentFolder("")}
           >
-            s3://root
-          </button>
-          {breadcrumbSegments.map((seg) => (
+            {config?.bucket_name ? `s3://${config.bucket_name}` : t("Sync root")}
+          </button> : <span>s3://{config?.bucket_name}</span>}
+          {viewMode === "tree" && breadcrumbSegments.map((seg) => (
             <React.Fragment key={seg.prefix}>
               <span className="crumb-sep">/</span>
               <button
@@ -889,13 +910,14 @@ export const StatusView: React.FC = () => {
                 className={`crumb-btn ${
                   currentFolder === seg.prefix ? "crumb-active" : ""
                 }`}
+                aria-current={currentFolder === seg.prefix ? "location" : undefined}
                 onClick={() => setCurrentFolder(seg.prefix)}
               >
                 {seg.label}
               </button>
             </React.Fragment>
           ))}
-        </div>
+        </nav>
       )}
 
       {isDragOver && (
@@ -905,12 +927,25 @@ export const StatusView: React.FC = () => {
       )}
 
       {/* Tabela Densa de Arquivos + Painel Inspector Lateral */}
-      {fileStatuses.length === 0 ? (
+      {noResults ? (
+        <div className="empty-table-view" role="region" aria-label={t("File list")}>
+          <p className="empty-status" role="status">
+            {hasFilters ? t("No files match these filters.") : t("This folder has no tracked files yet.")}
+          </p>
+          {hasFilters && <button type="button" className="btn-compact" onClick={clearFilters}>{t("Clear filters")}</button>}
+        </div>
+      ) : fileStatuses.length === 0 ? (
         <div className="empty-table-view">
-          <p className="empty-status">{syncAction === "starting" ? t("Connecting and checking files…") : t("No files are currently tracked.")}</p>
+          <p className="empty-status" role="status">{syncAction === "starting" ? t("Connecting and checking files…") : t("No files are currently tracked.")}</p>
           <span className="empty-subtext">
-            {syncAction === "starting" ? t("Wait for sync to initialize.") : syncRunning ? t("No files to display. Upload files or add them to the local folder.") : t("Start sync to load files from the local folder and S3.")}
+            {syncAction === "starting" ? t("Wait for sync to initialize.")
+              : !configured ? t("Choose a bucket and local folder in Settings.")
+              : syncRunning ? (canUpload ? t("No files to display. Upload files or add them to the local folder.") : t("Files from S3 will appear here when tracked."))
+              : t("Start sync to load files from the local folder and S3.")}
           </span>
+          {!configured && onOpenSettings && (
+            <button type="button" className="btn-compact" onClick={onOpenSettings}>{t("Open settings")}</button>
+          )}
         </div>
       ) : (
         <div className="status-split-body">
@@ -1126,7 +1161,7 @@ export const StatusView: React.FC = () => {
                           }
                           title={t("Inspect object metadata")}
                         >
-                          <Icon name="info" /><span className="sr-only">Info</span>
+                          <Icon name="info" /><span className="sr-only">{t("Inspect {0}", base)}</span>
                         </button>
                       </span>
                     </li>
@@ -1157,6 +1192,13 @@ export const StatusView: React.FC = () => {
                   </span>
                 </div>
 
+                {detailsState === "loading" && <p role="status">{t("Loading object details…")}</p>}
+                {detailsState === "error" && (
+                  <div role="alert">
+                    <p>{t("Could not load object details.")}</p>
+                    <button type="button" className="btn-compact" onClick={() => setInspectAttempt((attempt) => attempt + 1)}>{t("Try again")}</button>
+                  </div>
+                )}
                 {selectedMetadata && (
                   <>
                     <div className="inspector-kv">
@@ -1272,9 +1314,16 @@ export const StatusView: React.FC = () => {
 
                 <div className="inspector-kv">
                   <span className="inspector-k">
-                    {t("S3 VERSION HISTORY (")}{objectVersions.length})
+                    {versionsState === "ready" ? `${t("S3 VERSION HISTORY (")}${objectVersions.length})` : t("S3 version history")}
                   </span>
-                  {objectVersions.length === 0 ? (
+                  {versionsState === "loading" ? (
+                    <span role="status">{t("Loading S3 versions…")}</span>
+                  ) : versionsState === "error" ? (
+                    <div role="alert">
+                      <p>{t("Could not load S3 versions.")}</p>
+                      <button type="button" className="btn-compact" onClick={() => setInspectAttempt((attempt) => attempt + 1)}>{t("Try again")}</button>
+                    </div>
+                  ) : objectVersions.length === 0 ? (
                     <span className="prop-sub">
                       {t("No versions found. S3 Versioning may be disabled, or the object has not been uploaded yet.")}
                     </span>
