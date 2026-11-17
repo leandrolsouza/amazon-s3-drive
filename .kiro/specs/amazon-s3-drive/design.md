@@ -14,6 +14,10 @@ Uma pasta raiz previamente sincronizada indisponível bloqueia o início em vez 
 
 O Amazon S3 Drive é uma aplicação desktop cross-platform construída com **Tauri 2.x** (Rust + React/TypeScript). O aplicativo cria um drive virtual que sincroniza arquivos bidirecionalmente entre uma pasta local no computador do usuário e um bucket Amazon S3, operando em segundo plano via system tray.
 
+Quando a bandeja está disponível, o Tauri intercepta o fechamento da janela principal se `close_to_tray` estiver ativo. Configurações antigas sem esse campo usam o padrão ativo. O primeiro retorno à janela após ocultá-la apresenta uma orientação sobre como reabrir ou sair pela bandeja.
+
+O comando `sync_now` sinaliza o ciclo ativo da sincronização principal para consultar o S3. O ciclo processa a conferência manual pelo mesmo caminho das consultas periódicas e reinicia o temporizador após a consulta. O monitor de arquivos continua entregando eventos locais independentemente desse intervalo.
+
 **Princípios de design:**
 - Backend Rust cuida de toda a lógica pesada: sincronização, monitoramento de arquivos, comunicação com S3, fila de operações e resolução de conflitos
 - Frontend React/TypeScript é responsável exclusivamente pela interface: configuração, system tray, notificações e exibição de status

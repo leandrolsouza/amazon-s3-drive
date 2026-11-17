@@ -14,6 +14,7 @@ use tauri::{
 };
 
 pub const MENU_OPEN_DRIVE_ID: &str = "open_drive";
+pub(crate) const MAIN_TRAY_ID: &str = "main-tray";
 pub const MENU_SETTINGS_ID: &str = "settings";
 pub const MENU_QUIT_ID: &str = "quit";
 
@@ -52,7 +53,7 @@ pub fn setup_system_tray(
     let green_rgba = make_solid_rgba_icon(34, 197, 94);
     let initial_icon = Image::new_owned(green_rgba, 16, 16);
 
-    let tray = TrayIconBuilder::with_id("main-tray")
+    let tray = TrayIconBuilder::with_id(MAIN_TRAY_ID)
         .icon(initial_icon)
         .tooltip(tray_tooltip_for_state(&GlobalSyncState::UpToDate))
         .menu(&menu)
@@ -60,6 +61,7 @@ pub fn setup_system_tray(
             MENU_OPEN_DRIVE_ID => {
                 if let Some(w) = app_handle.get_webview_window("main") {
                     let _ = w.show();
+                    let _ = w.unminimize();
                     let _ = w.set_focus();
                 }
                 let _ = app_handle.emit("tray:navigate", "status");
@@ -67,6 +69,7 @@ pub fn setup_system_tray(
             MENU_SETTINGS_ID => {
                 if let Some(w) = app_handle.get_webview_window("main") {
                     let _ = w.show();
+                    let _ = w.unminimize();
                     let _ = w.set_focus();
                 }
                 let _ = app_handle.emit("tray:navigate", "config");

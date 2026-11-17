@@ -13,6 +13,7 @@ commands.allow = [
   "test_connection",
   "delete_credentials",
   "start_sync",
+  "sync_now",
   "stop_sync",
   "get_sync_status",
   "get_sync_running",

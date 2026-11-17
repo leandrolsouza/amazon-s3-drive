@@ -379,12 +379,21 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
     }));
   }, [currentFolder]);
 
-  const handleSyncNow = async () => {
+  const handleStartSync = async () => {
     try {
       await runSyncCommand("start_sync");
       setActionFeedback({ type: "ok", text: t("Sync started.") });
     } catch {
       setActionFeedback({ type: "error", text: t("Could not start sync. Check your settings and credentials, then select Start to try again.") });
+    }
+  };
+
+  const handleSyncNow = async () => {
+    try {
+      await invoke("sync_now");
+      setActionFeedback({ type: "ok", text: t("S3 check requested.") });
+    } catch (error) {
+      setActionFeedback({ type: "error", text: String(error) });
     }
   };
 
@@ -773,12 +782,12 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
           <button
             type="button"
             className="btn-compact toolbar-icon"
-            aria-label={t("Start")}
-            onClick={handleSyncNow}
+            aria-label={t(syncRunning ? "Sync now" : "Start")}
+            onClick={syncRunning ? handleSyncNow : handleStartSync}
             disabled={syncAction !== null}
-            title={t("Force sync now")}
+            title={t(syncRunning ? "Sync now" : "Start")}
           >
-            <Icon name={syncAction === "starting" ? "retry" : "play"} />
+            <Icon name={syncRunning || syncAction === "starting" ? "retry" : "play"} />
           </button>
           <button
             type="button"

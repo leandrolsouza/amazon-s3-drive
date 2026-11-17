@@ -22,6 +22,7 @@ export interface AppConfig {
   server_side_encryption?: boolean;
   bandwidth_limit_kbps?: number;
   launch_on_startup?: boolean;
+  close_to_tray?: boolean;
   sync_direction?: "Bidirectional" | "UploadOnly" | "DownloadOnly" | string;
 }
 

@@ -35,6 +35,7 @@ export const App: React.FC<{ windowsTitleBar?: boolean }> = ({ windowsTitleBar =
   const startupAttempted = useRef(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [startupRetry, setStartupRetry] = useState(0);
+  const [showTrayHint, setShowTrayHint] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const saved = localStorage.getItem("s3drive-theme");
@@ -116,6 +117,36 @@ export const App: React.FC<{ windowsTitleBar?: boolean }> = ({ windowsTitleBar =
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listen("tray:window-hidden", () => {
+      if (disposed) return;
+      try {
+        if (localStorage.getItem("s3drive-tray-hint-seen")) return;
+      } catch {
+        // The hint can still be shown if storage is unavailable.
+      }
+      setShowTrayHint(true);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const dismissTrayHint = () => {
+    setShowTrayHint(false);
+    try {
+      localStorage.setItem("s3drive-tray-hint-seen", "true");
+    } catch {
+      // Ignore
+    }
+  };
 
   const [selectedLanguage, setSelectedLanguage] = useState(locale);
   const [languageError, setLanguageError] = useState(false);
@@ -307,6 +338,12 @@ export const App: React.FC<{ windowsTitleBar?: boolean }> = ({ windowsTitleBar =
         <div className="workspace-pane">
           <AppUpdateNotice />
           <NotificationHandler onOpenConfig={() => setActiveTab("config")} />
+          {showTrayHint && (
+            <div role="status" className="banner">
+              {t("The app stays open in the system tray when you close this window. Use the tray menu to reopen or quit it.")}
+              <button type="button" onClick={dismissTrayHint}>{t("Dismiss")}</button>
+            </div>
+          )}
           {activeTab !== "buckets" && <DeletionReviewPanel />}
           {startupError && (
             <div role="alert" className="banner banner-error">

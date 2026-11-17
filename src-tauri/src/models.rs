@@ -14,6 +14,10 @@ fn default_sync_direction() -> String {
     "Bidirectional".to_string()
 }
 
+fn default_close_to_tray() -> bool {
+    true
+}
+
 // === Configuração da Aplicação ===
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
@@ -39,6 +43,8 @@ pub struct AppConfig {
     pub bandwidth_limit_kbps: u64,
     #[serde(default)]
     pub launch_on_startup: bool,
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
     #[serde(default = "default_sync_direction")]
     pub sync_direction: String,
 }
@@ -61,6 +67,7 @@ impl Default for AppConfig {
             server_side_encryption: false,
             bandwidth_limit_kbps: 0,
             launch_on_startup: false,
+            close_to_tray: default_close_to_tray(),
             sync_direction: default_sync_direction(),
         }
     }

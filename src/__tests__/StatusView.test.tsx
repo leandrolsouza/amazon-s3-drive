@@ -14,6 +14,15 @@ describe("StatusView", () => {
     vi.mocked(invoke).mockReset().mockResolvedValue([]);
   });
 
+  it("requests an S3 check without restarting active sync", async () => {
+    useSyncStore.getState().setSyncRunning(true);
+    render(<StatusView />);
+    fireEvent.click(screen.getByRole("button", { name: "Sincronizar agora" }));
+    await screen.findByText("Verificação do S3 solicitada.");
+    expect(invoke).toHaveBeenCalledWith("sync_now");
+    expect(invoke).not.toHaveBeenCalledWith("start_sync");
+  });
+
   it.each(["docs", "nova/subpasta"])("reviews files and sends only after confirmation to %s under the configured prefix", async (destination) => {
     useSyncStore.getState().setConfig({
       bucket_name: "test-bucket", local_path: "/test", s3_prefix: "workspace",

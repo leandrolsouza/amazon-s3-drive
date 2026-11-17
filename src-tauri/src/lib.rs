@@ -31,7 +31,7 @@ use crate::status_monitor::StatusMonitor;
 use crate::sync_engine::{SyncEngine, TauriEmitter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State, WindowEvent};
 
 pub struct AppState {
     pub sync_engine: Arc<SyncEngine>,
@@ -209,6 +209,12 @@ async fn start_sync(state: State<'_, AppState>) -> Result<(), String> {
         state.buckets.check_primary(&config)?;
     }
     start_engine(&state.sync_engine, &state.creds_manager, config, &state.db).await
+}
+
+#[tauri::command]
+async fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
+    let _lifecycle = state.primary_lifecycle.lock().await;
+    state.sync_engine.request_remote_sync().await
 }
 
 async fn start_engine(
@@ -872,6 +878,20 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            let WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            if window.label() != "main" || window.app_handle().tray_by_id(tray::MAIN_TRAY_ID).is_none() {
+                return;
+            }
+            if window.state::<AppState>().sync_engine.get_config().close_to_tray
+                && window.hide().is_ok()
+            {
+                api.prevent_close();
+                let _ = window.emit("tray:window-hidden", ());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             language::get_language,
             language::set_language,
@@ -884,6 +904,7 @@ pub fn run() {
             test_connection,
             delete_credentials,
             start_sync,
+            sync_now,
             stop_sync,
             get_sync_status,
             get_global_state,

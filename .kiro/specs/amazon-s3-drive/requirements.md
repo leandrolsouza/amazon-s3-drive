@@ -142,6 +142,8 @@ O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no comput
 4. WHILE arquivos estão com estado `sincronizando` ou `pendente`, THE Status_Monitor SHALL exibir um ícone animado de sincronização na área de notificação
 5. WHEN um erro de sincronização ocorre, THE Status_Monitor SHALL exibir o ícone de erro na área de notificação
 6. WHEN um erro de sincronização ocorre, THE Status_Monitor SHALL registrar os detalhes do erro em arquivo de log contendo: nome do arquivo, tipo de erro e timestamp com precisão de segundos
+7. Com a preferência de bandeja ativada, fechar a janela principal deve ocultá-la e manter a sincronização em andamento. A preferência é ativada por padrão e pode ser desabilitada em Configurações. O menu da bandeja permite reabrir a janela ou sair do aplicativo.
+8. Durante a sincronização, **Sincronizar agora** solicita uma conferência do S3 sem aguardar o próximo intervalo. O intervalo padrão para novas configurações é de 60 segundos.
 
 ---
 

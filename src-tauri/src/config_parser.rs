@@ -228,6 +228,7 @@ mod tests {
                         server_side_encryption: false,
                         bandwidth_limit_kbps: 0,
                         launch_on_startup: false,
+                        close_to_tray: true,
                         sync_direction: "Bidirectional".to_string(),
                     }
                 },
@@ -243,6 +244,14 @@ mod tests {
             let restored: AppConfig = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(config, restored);
         }
+    }
+
+    #[test]
+    fn test_missing_close_to_tray_defaults_to_enabled() {
+        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+        json.as_object_mut().unwrap().remove("close_to_tray");
+        let restored: AppConfig = serde_json::from_value(json).unwrap();
+        assert!(restored.close_to_tray);
     }
 
     #[test]
@@ -333,6 +342,7 @@ mod tests {
             server_side_encryption: false,
             bandwidth_limit_kbps: 0,
             launch_on_startup: false,
+            close_to_tray: true,
             sync_direction: "Bidirectional".to_string(),
         };
         let errs = ConfigParser::validate(&config).unwrap_err();

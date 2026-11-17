@@ -30,6 +30,7 @@ const DEFAULT_CONFIG: AppConfig = {
   server_side_encryption: false,
   bandwidth_limit_kbps: 0,
   launch_on_startup: false,
+  close_to_tray: true,
   sync_direction: "Bidirectional",
 };
 
@@ -1124,6 +1125,15 @@ export const ConfigurationPage: React.FC<ConfigurationPageProps> = ({
                 <span>{t("Notify on sync errors (always on)")}</span>
               </label>
 
+              <label htmlFor="close_to_tray" className="check-inline">
+                <input
+                  id="close_to_tray"
+                  type="checkbox"
+                  checked={config.close_to_tray ?? true}
+                  onChange={(e) => setConfig({ ...config, close_to_tray: e.target.checked })}
+                />
+                <span>{t("Keep the app in the system tray when closing the window")}</span>
+              </label>
               <label htmlFor="launch_on_startup" className="check-inline">
                 <input
                   id="launch_on_startup"

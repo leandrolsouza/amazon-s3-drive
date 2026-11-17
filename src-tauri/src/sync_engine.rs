@@ -25,7 +25,7 @@ use std::sync::{
     Arc, Mutex, RwLock,
 };
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
 #[path = "deletion_review.rs"]
@@ -284,6 +284,12 @@ pub fn is_excluded(path: &Path, patterns: &[String]) -> bool {
     })
 }
 
+struct SyncWorker {
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+    sync_now: Arc<Notify>,
+}
+
 pub struct SyncEngine {
     config: Arc<RwLock<AppConfig>>,
     s3_client: Arc<RwLock<Option<S3Client>>>,
@@ -298,7 +304,7 @@ pub struct SyncEngine {
     retry_policy: RetryPolicy,
     watcher: Arc<Mutex<Option<FileWatcher>>>,
     reconciliation_lock: tokio::sync::Mutex<()>,
-    worker: tokio::sync::Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
+    worker: tokio::sync::Mutex<Option<SyncWorker>>,
     stopping: AtomicBool,
     pending_conflicts: Mutex<HashMap<String, String>>,
 }
@@ -514,6 +520,8 @@ impl SyncEngine {
         let engine = Arc::clone(self);
         let cancel = CancellationToken::new();
         let shutdown = cancel.clone();
+        let sync_now = Arc::new(Notify::new());
+        let manual_check = Arc::clone(&sync_now);
         let task = tokio::spawn(async move {
             let next_poll = || {
                 let seconds = engine.get_config().sync_interval_secs.clamp(1, 60);
@@ -529,6 +537,7 @@ impl SyncEngine {
                         let _ = engine.queue_manager.requeue_failed_items();
                         true
                     }
+                    _ = manual_check.notified() => true,
                     _ = &mut poll => true,
                     event = fs_rx.recv() => {
                         let Some(event) = event else { break; };
@@ -545,8 +554,20 @@ impl SyncEngine {
                 let _ = engine.process_queue().await;
             }
         });
-        *worker = Some((cancel, task));
+        *worker = Some(SyncWorker { cancel, task, sync_now });
 
+        Ok(())
+    }
+
+    pub async fn request_remote_sync(&self) -> Result<(), String> {
+        let worker = self.worker.lock().await;
+        let worker = worker.as_ref().filter(|worker| !worker.task.is_finished()).ok_or_else(|| {
+            tr("Start synchronization before requesting a check.", "Inicie a sincronização antes de solicitar uma verificação.").to_string()
+        })?;
+        if !self.network_detector.is_online() {
+            return Err(tr("The app is offline. Try again when it reconnects.", "O app está offline. Tente novamente quando a conexão voltar.").to_string());
+        }
+        worker.sync_now.notify_one();
         Ok(())
     }
 
@@ -555,8 +576,8 @@ impl SyncEngine {
         let mut worker = self.worker.lock().await;
         self.stopping.store(true, Ordering::SeqCst);
         self.running.store(false, Ordering::SeqCst);
-        if let Some((cancel, _)) = worker.as_ref() {
-            cancel.cancel();
+        if let Some(worker) = worker.as_ref() {
+            worker.cancel.cancel();
         }
         self.network_detector.stop();
         self.network_detector.clear_callbacks();
@@ -565,8 +586,8 @@ impl SyncEngine {
             fw.stop();
         }
 
-        if let Some((_, task)) = worker.as_mut() {
-            let _ = task.await;
+        if let Some(worker) = worker.as_mut() {
+            let _ = (&mut worker.task).await;
         }
         *worker = None;
         self.drain_active_transfers().await;
