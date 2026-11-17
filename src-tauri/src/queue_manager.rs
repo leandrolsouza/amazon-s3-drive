@@ -116,6 +116,14 @@ impl QueueManager {
         Ok(())
     }
 
+    pub fn has_unfinished_operation(&self, key: &str) -> Result<bool, QueueError> {
+        self.conn.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_queue WHERE state IN ('Pending', 'Processing', 'Failed') AND (s3_key = ?1 OR (operation_type IN ('Rename', 'Move') AND extra = ?1)))",
+            [key],
+            |row| row.get(0),
+        ).map_err(|err| QueueError::Database(err.to_string()))
+    }
+
     pub fn active_delete_keys(&self) -> Result<std::collections::HashSet<String>, QueueError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn

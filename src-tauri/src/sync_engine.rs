@@ -30,6 +30,9 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "deletion_review.rs"]
 mod deletion_review;
+mod reconciliation;
+mod trash;
+use reconciliation::SyncDirection;
 
 pub trait EventEmitter: Send + Sync {
     fn emit_json(&self, event: &str, payload: serde_json::Value);
@@ -371,7 +374,7 @@ impl SyncEngine {
         self.config.read().unwrap().clone()
     }
 
-    fn configured_s3(&self) -> Result<(AppConfig, S3Client), SyncError> {
+    pub(crate) fn configured_s3(&self) -> Result<(AppConfig, S3Client), SyncError> {
         let config = self.config.read().unwrap();
         let client = self.s3_client.read().unwrap().clone().ok_or_else(|| {
             SyncError::Credentials(
@@ -387,6 +390,14 @@ impl SyncEngine {
 
     pub fn status_monitor(&self) -> Arc<StatusMonitor> {
         Arc::clone(&self.status_monitor)
+    }
+
+    pub fn last_file_sync_time(&self) -> Result<Option<String>, rusqlite::Error> {
+        let fingerprint = config_fingerprint(&self.get_config());
+        if self.db.get_config_fingerprint()?.as_deref() != Some(fingerprint.as_str()) {
+            return Ok(None);
+        }
+        self.db.last_file_sync_time()
     }
 
     pub fn queue_manager(&self) -> Arc<QueueManager> {
@@ -541,6 +552,12 @@ impl SyncEngine {
                     _ = &mut poll => true,
                     event = fs_rx.recv() => {
                         let Some(event) = event else { break; };
+                        // A exclusão bidirecional chama poll_remote_changes, que adquire o lock.
+                        let _guard = if matches!(&event, LocalFsEvent::Deleted(_)) {
+                            None
+                        } else {
+                            Some(engine.reconciliation_lock.lock().await)
+                        };
                         let _ = engine.process_local_event(event).await;
                         false
                     }
@@ -704,6 +721,11 @@ impl SyncEngine {
                     .map_err(|e| SyncError::Queue(e.to_string()))?
                 {
                     if cfg.sync_direction.eq_ignore_ascii_case("UploadOnly") {
+                        let _guard = self.reconciliation_lock.lock().await;
+                        // Um evento atrasado pode chegar após a restauração do arquivo.
+                        if path.try_exists().map_err(|err| SyncError::Io(err.to_string()))? {
+                            return Ok(());
+                        }
                         self.enqueue_and_notify(SyncOperation {
                             operation_type: SyncOperationType::Delete,
                             s3_key,
@@ -744,7 +766,8 @@ impl SyncEngine {
         }
 
         let (cfg, s3_client) = self.configured_s3()?;
-        let is_upload_only = cfg.sync_direction.eq_ignore_ascii_case("UploadOnly");
+        let direction = SyncDirection::from_config(&cfg);
+        let is_upload_only = direction.is_upload_only();
         let base = PathBuf::from(&cfg.local_path);
         fs::read_dir(&base).map_err(|e| SyncError::Io(e.to_string()))?;
         if !cfg.sync_direction.eq_ignore_ascii_case("Bidirectional") {
@@ -819,187 +842,18 @@ impl SyncEngine {
                     .unwrap_or_else(|| Self::delete_review_entry(&s3_obj.key, &review.local_path));
                 entry.local_path = review.local_path.clone();
                 if path_within_sync_folder(Path::new(&entry.local_path), &base) {
-                    self.review_deletion(&entry, Some(s3_obj), true)?;
+                    self.review_queued_deletion(&entry, s3_obj)?;
                 }
                 continue;
             }
-            let existing = existing_entries.get(&s3_obj.key);
-            match existing {
-                None => {
-                    if !is_upload_only {
-                        if local_path.exists() {
-                            // Arquivo existe localmente mas não está registrado no BD.
-                            // Verificar se o conteúdo já coincide com o remoto antes de sobrescrever.
-                            if let Ok(local_md5) = compute_md5(&local_path) {
-                                if local_md5 == s3_obj.etag {
-                                    // Conteúdo idêntico: apenas registrar sem fazer download
-                                    let size = fs::metadata(&local_path)
-                                        .map(|m| m.len())
-                                        .unwrap_or(s3_obj.size);
-                                    let now = Utc::now();
-                                    let entry = FileEntry {
-                                        s3_key: s3_obj.key.clone(),
-                                        local_path: local_path.to_string_lossy().to_string(),
-                                        sync_state: SyncState::Synced,
-                                        last_sync_etag: Some(s3_obj.etag.clone()),
-                                        local_hash: Some(local_md5.clone()),
-                                        last_sync_time: Some(now),
-                                        local_modified_time: Some(now),
-                                        size_bytes: size,
-                                    };
-                                    let _ = self.db.upsert_file_entry(&entry);
-                                    self.status_monitor.set_file_status(
-                                        &s3_obj.key,
-                                        SyncState::Synced,
-                                        size,
-                                    );
-                                    continue;
-                                }
-                            }
-                            // Conteúdos diferem: tratar como conflito para não sobrescrever dados locais
-                            let local_modified = fs::metadata(&local_path)
-                                .ok()
-                                .and_then(|m| m.modified().ok())
-                                .map(DateTime::<Utc>::from)
-                                .unwrap_or_else(Utc::now);
-                            let size_bytes =
-                                fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
-                            let synthetic_entry = FileEntry {
-                                s3_key: s3_obj.key.clone(),
-                                local_path: local_path.to_string_lossy().to_string(),
-                                sync_state: SyncState::Pending,
-                                last_sync_etag: None,
-                                local_hash: None,
-                                last_sync_time: None,
-                                local_modified_time: Some(local_modified),
-                                size_bytes,
-                            };
-                            let resolver = ConflictResolver::new(base.clone());
-                            match resolver.resolve(&synthetic_entry, s3_obj, &s3_client).await {
-                                Ok(conflict_info) => {
-                                    self.record_conflict(&conflict_info);
-                                }
-                                Err(err) => {
-                                    let err_str = err.to_string();
-                                    self.status_monitor
-                                        .set_state(&s3_obj.key, SyncState::Error(err_str.clone()));
-                                    self.emit(
-                                        "sync:error",
-                                        &SyncErrorEvent {
-                                            file: s3_obj.key.clone(),
-                                            error: err_str,
-                                            retry_count: 3,
-                                        },
-                                    );
-                                }
-                            }
-                        } else {
-                            // Objeto novo no S3, sem arquivo local — download normal
-                            let op = SyncOperation {
-                                operation_type: SyncOperationType::Download,
-                                s3_key: s3_obj.key.clone(),
-                                local_path: local_path.to_string_lossy().to_string(),
-                                extra: None,
-                            };
-                            self.enqueue_and_notify(op)?;
-                        }
-                    }
-                }
-                Some(entry) => {
-                    let local_exists = local_path
-                        .try_exists()
-                        .map_err(|e| SyncError::Io(e.to_string()))?;
-                    if !local_exists && entry.last_sync_etag.is_some() {
-                        if cfg.sync_direction.eq_ignore_ascii_case("DownloadOnly") {
-                            self.enqueue_and_notify(SyncOperation {
-                                operation_type: SyncOperationType::Download,
-                                s3_key: s3_obj.key.clone(),
-                                local_path: entry.local_path.clone(),
-                                extra: None,
-                            })?;
-                        } else if !is_upload_only {
-                            self.review_deletion(entry, Some(s3_obj), false)?;
-                        }
-                        continue;
-                    }
-                    if self.has_deletion_review(&s3_obj.key)? {
-                        self.clear_deletion_review(&s3_obj.key)?;
-                    }
-                    // Detectar mudança local usando metadados do SO como proxy barato antes
-                    // de recalcular o hash. Para arquivos grandes, ler mtime e tamanho é uma
-                    // syscall; calcular MD5 lê o arquivo inteiro — evitar no caso estável.
-                    let mut updated_entry = entry.clone();
-                    if local_path.exists() {
-                        if let Ok(meta) = fs::metadata(&local_path) {
-                            let current_size = meta.len();
-                            let current_mtime: Option<DateTime<Utc>> =
-                                meta.modified().ok().map(DateTime::<Utc>::from);
-
-                            // Recalcular hash somente se tamanho ou mtime indicam mudança.
-                            let size_changed = current_size != entry.size_bytes;
-                            let mtime_newer = current_mtime
-                                .zip(entry.last_sync_time)
-                                .map(|(mtime, sync_time)| mtime > sync_time)
-                                .unwrap_or(true); // sem referência → recalcular
-
-                            if size_changed || mtime_newer {
-                                if let Ok(file_md5) = compute_md5(&local_path) {
-                                    let local_ref = entry
-                                        .local_hash
-                                        .as_deref()
-                                        .or(entry.last_sync_etag.as_deref());
-                                    if local_ref
-                                        .map(|h| !file_md5.eq_ignore_ascii_case(h))
-                                        .unwrap_or(false)
-                                    {
-                                        updated_entry.local_modified_time = Some(Utc::now());
-                                        updated_entry.size_bytes = current_size;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !is_upload_only && ConflictResolver::detect_conflict(&updated_entry, s3_obj)
-                    {
-                        let resolver = ConflictResolver::new(base.clone());
-                        match resolver.resolve(&updated_entry, s3_obj, &s3_client).await {
-                            Ok(conflict_info) => {
-                                self.record_conflict(&conflict_info);
-                            }
-                            Err(err) => {
-                                let err_str = err.to_string();
-                                self.status_monitor
-                                    .set_state(&s3_obj.key, SyncState::Error(err_str.clone()));
-                                self.emit(
-                                    "sync:error",
-                                    &SyncErrorEvent {
-                                        file: s3_obj.key.clone(),
-                                        error: err_str,
-                                        retry_count: 3,
-                                    },
-                                );
-                            }
-                        }
-                    } else if !is_upload_only && Some(s3_obj.etag.clone()) != entry.last_sync_etag {
-                        // Modificado apenas remotamente -> Download
-                        let op = SyncOperation {
-                            operation_type: SyncOperationType::Download,
-                            s3_key: s3_obj.key.clone(),
-                            local_path: local_path.to_string_lossy().to_string(),
-                            extra: None,
-                        };
-                        self.enqueue_and_notify(op)?;
-                    } else {
-                        // Já sincronizado e íntegro -> garantir que está visível no StatusMonitor
-                        self.status_monitor.set_file_status(
-                            &s3_obj.key,
-                            SyncState::Synced,
-                            s3_obj.size,
-                        );
-                    }
-                }
-            }
+            self.reconcile_file(
+                &cfg,
+                &s3_client,
+                &s3_obj.key,
+                &local_path,
+                existing_entries.get(&s3_obj.key),
+                Some(s3_obj),
+            ).await?;
         }
 
         for key in queued_reviews
@@ -1022,36 +876,8 @@ impl SyncEngine {
                     {
                         continue;
                     }
-                    if local_path
-                        .try_exists()
-                        .map_err(|e| SyncError::Io(e.to_string()))?
-                    {
-                        if cfg.sync_direction.eq_ignore_ascii_case("DownloadOnly") {
-                            // Mesmo em download-only, preservar uma cópia local antes de remover.
-                            let trash_dir = base.join(deletion_review::TRASH).join(
-                                Utc::now()
-                                    .timestamp_nanos_opt()
-                                    .unwrap_or_default()
-                                    .to_string(),
-                            );
-                            require_local_path(&trash_dir, &base)?;
-                            fs::create_dir_all(&trash_dir)
-                                .map_err(|e| SyncError::Io(e.to_string()))?;
-                            let name = local_path
-                                .file_name()
-                                .ok_or_else(|| SyncError::Io(tr("Invalid name.", "Nome inválido.").into()))?;
-                            let trash_path = trash_dir.join(name);
-                            require_local_path(&trash_path, &base)?;
-                            fs::rename(&local_path, trash_path)
-                                .map_err(|e| SyncError::Io(e.to_string()))?;
-                        } else {
-                            self.review_deletion(entry, None, false)?;
-                            continue;
-                        }
-                    }
-                    self.clear_deletion_review(s3_key)?;
-                    let _ = self.db.delete_file_entry(s3_key);
-                    self.status_monitor.remove_state(s3_key);
+                    self.reconcile_file(&cfg, &s3_client, s3_key, &local_path, Some(entry), None)
+                        .await?;
                 }
             }
         }
@@ -1242,7 +1068,7 @@ impl SyncEngine {
                         if ConflictResolver::detect_conflict(&entry, &remote_info) {
                             let resolver = ConflictResolver::new(base.to_path_buf());
                             let info = resolver.resolve(&entry, &remote_info, s3_client).await?;
-                            self.record_conflict(&info);
+                            self.record_conflict(&op.s3_key, &info);
                         }
                     }
                 }
@@ -1358,16 +1184,16 @@ impl SyncEngine {
             }
             SyncOperationType::Delete => {
                 if let Some(etag) = op.extra.as_deref().filter(|etag| !etag.is_empty()) {
-                    match s3_client.delete_object_if_match(&op.s3_key, etag).await {
+                    match self.trash_remote_revision(&cfg, s3_client, &op.s3_key, etag).await {
                         Ok(()) => return self.finish_queued_delete(&op.s3_key),
-                        Err(S3Error::PreconditionFailed) => {}
+                        Err(S3Error::PreconditionFailed | S3Error::ObjectNotFound) => {}
                         Err(err) => return Err(err.into()),
                     }
                 }
                 match s3_client.head_object(&op.s3_key).await {
                     Ok(remote) => {
                         let entry = Self::delete_review_entry(&op.s3_key, &op.local_path);
-                        self.review_deletion(&entry, Some(&remote), true)
+                        self.review_queued_deletion(&entry, &remote)
                     }
                     Err(S3Error::ObjectNotFound) => self.finish_queued_delete(&op.s3_key),
                     Err(err) => Err(err.into()),
@@ -1465,12 +1291,12 @@ impl SyncEngine {
         }
     }
 
-    fn record_conflict(&self, info: &ConflictInfo) {
+    fn record_conflict(&self, s3_key: &str, info: &ConflictInfo) {
         self.pending_conflicts
             .lock()
             .unwrap()
             .insert(info.local_path.clone(), info.conflict_copy_path.clone());
-        self.emit("conflict:detected", &ConflictEvent::from(info));
+        self.emit("conflict:detected", &ConflictEvent::new(s3_key, info));
     }
 
     pub(crate) fn scoped_local_path(
@@ -1854,14 +1680,14 @@ impl SyncEngine {
         Ok(format!("{}/", rel_key))
     }
 
-    fn enqueue_manual_delete(&self, key: &str, path: &Path) -> Result<Option<i64>, SyncError> {
+    fn enqueue_manual_delete(&self, cfg: &AppConfig, key: &str, path: &Path) -> Result<Option<i64>, SyncError> {
         let etag = self
             .db
             .get_file_entry_by_key(key)
             .map_err(|err| SyncError::Queue(err.to_string()))?
             .and_then(|entry| entry.last_sync_etag);
         if path.is_file() {
-            fs::remove_file(path).map_err(|err| SyncError::Io(err.to_string()))?;
+            self.move_to_local_trash(cfg, key, path)?;
         }
         self.enqueue_and_notify(SyncOperation {
             operation_type: SyncOperationType::Delete,
@@ -1879,7 +1705,7 @@ impl SyncEngine {
         let local_path = self.scoped_local_path(s3_key, &cfg)?;
         self.clear_deletion_review(s3_key)?;
 
-        self.enqueue_manual_delete(s3_key, &local_path)?;
+        self.enqueue_manual_delete(&cfg, s3_key, &local_path)?;
         if self.network_detector.is_online() {
             let _ = self.process_queue().await;
         }
@@ -1957,7 +1783,7 @@ impl SyncEngine {
         for (s3_key, local_path) in s3_keys.iter().zip(paths) {
             require_local_path(&local_path, Path::new(&cfg.local_path))?;
             self.clear_deletion_review(s3_key)?;
-            if self.enqueue_manual_delete(s3_key, &local_path)?.is_some() {
+            if self.enqueue_manual_delete(&cfg, s3_key, &local_path)?.is_some() {
                 count += 1;
             }
             self.status_monitor.remove_state(s3_key);
@@ -2152,7 +1978,7 @@ mod tests {
         assert_eq!(fs::read(&copy).unwrap(), b"remote");
         assert_eq!(queue.count_pending().unwrap(), 0);
 
-        engine.record_conflict(&ConflictInfo {
+        engine.record_conflict("team/keep.txt", &ConflictInfo {
             file_name: "keep.txt".into(),
             local_path: local.to_str().unwrap().into(),
             conflict_copy_path: copy.to_str().unwrap().into(),

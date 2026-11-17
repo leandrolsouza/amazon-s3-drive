@@ -300,6 +300,11 @@ fn get_sync_status(state: State<'_, AppState>) -> Vec<FileStatus> {
 }
 
 #[tauri::command]
+fn get_last_file_sync_time(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state.sync_engine.last_file_sync_time().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn get_global_state(state: State<'_, AppState>) -> GlobalSyncState {
     state.sync_engine.status_monitor().global_state()
 }
@@ -907,6 +912,7 @@ pub fn run() {
             sync_now,
             stop_sync,
             get_sync_status,
+            get_last_file_sync_time,
             get_global_state,
             get_sync_running,
             get_queue_stats,
@@ -944,6 +950,8 @@ pub fn run() {
             buckets::add_sync_bucket,
             buckets::set_bucket_sync_enabled,
             buckets::get_bucket_details,
+            buckets::list_trash,
+            buckets::restore_trash,
             buckets::get_bucket_deletions,
             buckets::resolve_bucket_deletion,
             buckets::resolve_bucket_conflict,

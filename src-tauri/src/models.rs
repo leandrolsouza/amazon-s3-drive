@@ -202,6 +202,37 @@ pub struct DeletionReview {
     pub local_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrashSource {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrashEntry {
+    pub source: TrashSource,
+    pub locator: String,
+    pub original_key: Option<String>,
+    pub file_name: String,
+    pub deleted_at: DateTime<Utc>,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct TrashListing {
+    pub entries: Vec<TrashEntry>,
+    pub local_error: Option<String>,
+    pub remote_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TrashRestore {
+    Restored { backup_retained: bool },
+    Blocked { local: bool, remote: bool },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConflictInfo {
     pub file_name: String,
@@ -215,6 +246,7 @@ pub struct ConflictInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConflictEvent {
+    pub s3_key: String,
     pub file_name: String,
     pub local_path: String,
     pub conflict_copy_path: String,
@@ -224,9 +256,10 @@ pub struct ConflictEvent {
     pub remote_size_bytes: u64,
 }
 
-impl From<&ConflictInfo> for ConflictEvent {
-    fn from(info: &ConflictInfo) -> Self {
+impl ConflictEvent {
+    pub fn new(s3_key: &str, info: &ConflictInfo) -> Self {
         Self {
+            s3_key: s3_key.to_owned(),
             file_name: info.file_name.clone(),
             local_path: info.local_path.clone(),
             conflict_copy_path: info.conflict_copy_path.clone(),

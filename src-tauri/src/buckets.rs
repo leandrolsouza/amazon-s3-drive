@@ -1,6 +1,6 @@
 use crate::language::tr;
 use super::*;
-use crate::models::{ConflictEvent, DeletionReview};
+use crate::models::{ConflictEvent, DeletionReview, TrashListing, TrashRestore, TrashSource};
 use crate::sync_engine::EventEmitter;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -37,6 +37,7 @@ pub struct BucketSummary {
 
 #[derive(Serialize)]
 pub struct BucketDetails {
+    last_file_sync_time: Option<String>,
     files: Vec<FileStatus>,
     logs: Vec<String>,
     conflicts: Vec<ConflictEvent>,
@@ -494,10 +495,61 @@ pub fn get_bucket_details(id: i64, state: State<'_, AppState>) -> Result<BucketD
         .cloned()
         .collect();
     Ok(BucketDetails {
+        last_file_sync_time: runtime.engine.last_file_sync_time().map_err(|err| err.to_string())?,
         files: runtime.engine.status_monitor().get_all(),
         logs: runtime.engine.status_monitor().read_logs(100),
         conflicts,
     })
+}
+
+async fn connect_trash_client(engine: &SyncEngine, credentials: &CredentialsManager) -> Result<(), String> {
+    if engine.configured_s3().is_err() {
+        let config = engine.get_config();
+        if config.bucket_name.trim().is_empty() || config.local_path.trim().is_empty() {
+            return Err(tr("Configure a bucket and local folder first.", "Configure um bucket e uma pasta local primeiro.").into());
+        }
+        engine.set_s3_client(sync_client(credentials, &config, None).await?);
+    }
+    Ok(())
+}
+
+async fn load_trash(engine: &SyncEngine, credentials: &CredentialsManager) -> TrashListing {
+    let connection_error = connect_trash_client(engine, credentials).await.err();
+    let mut listing = engine.list_trash().await;
+    if connection_error.is_some() {
+        listing.remote_error = connection_error;
+    }
+    listing
+}
+
+#[tauri::command]
+pub async fn list_trash(bucket_id: Option<i64>, state: State<'_, AppState>) -> Result<TrashListing, String> {
+    if let Some(id) = bucket_id {
+        let runtime = state.buckets.runtime(&state.buckets.profile(id)?)?;
+        let _lifecycle = runtime.lifecycle.lock().await;
+        Ok(load_trash(&runtime.engine, &state.creds_manager).await)
+    } else {
+        let _lifecycle = state.primary_lifecycle.lock().await;
+        Ok(load_trash(&state.sync_engine, &state.creds_manager).await)
+    }
+}
+
+#[tauri::command]
+pub async fn restore_trash(
+    bucket_id: Option<i64>, source: TrashSource, locator: String,
+    legacy_path: Option<String>, state: State<'_, AppState>,
+) -> Result<TrashRestore, String> {
+    let result = if let Some(id) = bucket_id {
+        let runtime = state.buckets.runtime(&state.buckets.profile(id)?)?;
+        let _lifecycle = runtime.lifecycle.lock().await;
+        connect_trash_client(&runtime.engine, &state.creds_manager).await?;
+        runtime.engine.restore_trash(source, &locator, legacy_path.as_deref()).await
+    } else {
+        let _lifecycle = state.primary_lifecycle.lock().await;
+        connect_trash_client(&state.sync_engine, &state.creds_manager).await?;
+        state.sync_engine.restore_trash(source, &locator, legacy_path.as_deref()).await
+    };
+    result.map_err(|err| err.to_string())
 }
 
 #[tauri::command]

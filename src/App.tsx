@@ -14,10 +14,10 @@ import { StorageView } from "./pages/StorageView";
 import { SiteView } from "./pages/SiteView";
 import { LogsView } from "./pages/LogsView";
 import { StatusView, formatBytes } from "./pages/StatusView";
-import { useSyncStore } from "./store";
+import { syncScope, useSyncStore } from "./store";
 import "./styles.css";
 import { syncPresentation } from "./syncPresentation";
-import { AppConfig } from "./types";
+import { AppConfig, DeletionReview } from "./types";
 import { runSyncCommand } from "./syncCommands";
 import { initializeLocale, locale, t } from "./i18n";
 
@@ -47,6 +47,11 @@ export const App: React.FC<{ windowsTitleBar?: boolean }> = ({ windowsTitleBar =
   });
 
   const config = useSyncStore((s) => s.config);
+  const bucketScope = syncScope(config);
+  const [reviewSnapshot, setReviewSnapshot] = useState<{ scope: string; reviews: DeletionReview[] }>();
+  const updateReviews = React.useCallback((reviews: DeletionReview[]) => {
+    setReviewSnapshot({ scope: bucketScope, reviews });
+  }, [bucketScope]);
   const presentation = syncPresentation(useSyncStore());
   const [folderError, setFolderError] = useState(false);
   const fileStatuses = useSyncStore((s) => s.fileStatuses);
@@ -344,7 +349,7 @@ export const App: React.FC<{ windowsTitleBar?: boolean }> = ({ windowsTitleBar =
               <button type="button" onClick={dismissTrayHint}>{t("Dismiss")}</button>
             </div>
           )}
-          {activeTab !== "buckets" && <DeletionReviewPanel />}
+          {activeTab !== "buckets" && <DeletionReviewPanel key={bucketScope} onReviewsChange={updateReviews} />}
           {startupError && (
             <div role="alert" className="banner banner-error">
               {t("Could not start sync:") + " "}{startupError}
@@ -377,8 +382,9 @@ export const App: React.FC<{ windowsTitleBar?: boolean }> = ({ windowsTitleBar =
               {(statusVisited || activeTab === "status") && (
                 <div className="status-workspace" hidden={activeTab !== "status"}>
                   <StatusView
-                    key={JSON.stringify([config?.bucket_name, config?.local_path, config?.s3_prefix, config?.aws_region, config?.endpoint_url])}
+                    key={bucketScope}
                     active={activeTab === "status"}
+                    reviews={reviewSnapshot?.scope === bucketScope ? reviewSnapshot.reviews : undefined}
                     onOpenSettings={() => setActiveTab("config")}
                   />
                 </div>

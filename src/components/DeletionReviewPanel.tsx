@@ -1,28 +1,44 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { DeletionReview } from "../types";
 import { t } from "../i18n";
 
-export function DeletionReviewPanel({ bucketId, paused = false }: { bucketId?: number; paused?: boolean } = {}) {
+export function DeletionReviewPanel({ bucketId, paused = false, onReviewsChange }: {
+  bucketId?: number;
+  paused?: boolean;
+  onReviewsChange?: (reviews: DeletionReview[]) => void;
+} = {}) {
   const [reviews, setReviews] = useState<DeletionReview[]>([]);
   const [busy, setBusy] = useState(false);
+  const resolving = useRef(false);
+  const revision = useRef(0);
   const [error, setError] = useState("");
   useEffect(() => {
+    onReviewsChange?.(reviews);
+  }, [onReviewsChange, reviews]);
+  useEffect(() => {
     let mounted = true;
+    let loading = false;
     const refresh = async () => {
+      if (loading || resolving.current) return;
+      const requestedRevision = revision.current;
+      loading = true;
       try {
         const pending = bucketId === undefined
           ? await invoke<DeletionReview[]>("get_deletion_reviews")
           : await invoke<DeletionReview[]>("get_bucket_deletions", { id: bucketId });
-        if (mounted && Array.isArray(pending)) setReviews(pending);
+        if (mounted && requestedRevision === revision.current && Array.isArray(pending)) setReviews(pending);
       } catch { /* O próximo ciclo tenta novamente. */ }
+      finally { loading = false; }
     };
     void refresh();
     const timer = setInterval(refresh, 2000);
     return () => { mounted = false; clearInterval(timer); };
   }, [bucketId]);
   const resolve = async (items: DeletionReview[], restore: boolean) => {
-    if (busy) return;
+    if (resolving.current) return;
+    resolving.current = true;
+    revision.current += 1;
     setBusy(true);
     setError("");
     try {
@@ -36,7 +52,10 @@ export function DeletionReviewPanel({ bucketId, paused = false }: { bucketId?: n
       }
     } catch (cause) {
       setError(t("Could not complete the operation. {0}", String(cause)));
-    } finally { setBusy(false); }
+    } finally {
+      resolving.current = false;
+      setBusy(false);
+    }
   };
   if (!reviews.length) return null;
   return <div className="notification-card notification-warning deletion-review-panel" role="region" aria-label={t("Review deletions")}>

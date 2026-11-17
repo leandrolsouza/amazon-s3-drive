@@ -6,7 +6,8 @@
 - Exclusões detectadas pelo monitor ou pela reconciliação exigem confirmação. Oferecer restauração e confirmação individual; permitir confirmação em lote apenas para exclusões sem conflito.
 - Exclusão de um lado e edição do outro constituem conflito. Preservar a versão existente até uma decisão explícita; revalidar a revisão apresentada e os conteúdos antes de executar.
 - Persistir pendências entre sessões. Falhas mantêm a pendência e o histórico para nova tentativa. Se ambos os lados já foram excluídos, limpar o registro.
-- Antes de propagar uma exclusão, preservar a versão restante em `.s3-drive-trash` no lado de destino. Essas cópias não são sincronizadas e não têm expiração automática; a recuperação é manual. Operações explícitas de exclusão pela tela de arquivos mantêm seu fluxo próprio de confirmação.
+- Antes de propagar uma exclusão, preservar a versão restante em `.s3-drive-trash` no lado de destino. Operações explícitas de exclusão pela tela de arquivos mantêm seu fluxo de confirmação e preservam as versões existentes. As cópias não são sincronizadas e não têm expiração automática.
+- A lixeira do bucket lista as cópias locais e do S3 com data, tamanho e caminho original quando disponível. Restaurar recria o arquivo na pasta sincronizada e no S3. Se o destino estiver ocupado em qualquer lado, mostrar um aviso e preservar os arquivos. Cópias locais antigas sem caminho registrado exigem um destino relativo à pasta sincronizada.
 - Pasta raiz indisponível e erros de leitura ou listagem não devem ser interpretados como exclusão. Respeitar padrões de exclusão e os modos UploadOnly/DownloadOnly.
 
 ## Introduction
@@ -144,6 +145,8 @@ O Amazon S3 Drive é uma aplicação desktop que cria um drive virtual no comput
 6. WHEN um erro de sincronização ocorre, THE Status_Monitor SHALL registrar os detalhes do erro em arquivo de log contendo: nome do arquivo, tipo de erro e timestamp com precisão de segundos
 7. Com a preferência de bandeja ativada, fechar a janela principal deve ocultá-la e manter a sincronização em andamento. A preferência é ativada por padrão e pode ser desabilitada em Configurações. O menu da bandeja permite reabrir a janela ou sair do aplicativo.
 8. Durante a sincronização, **Sincronizar agora** solicita uma conferência do S3 sem aguardar o próximo intervalo. O intervalo padrão para novas configurações é de 60 segundos.
+9. A tela de arquivos e a atividade dos buckets adicionais devem exibir o bucket e o prefixo, o horário da última sincronização registrada de um arquivo, o número de arquivos em andamento e o número de arquivos que precisam de atenção.
+10. O filtro **Precisa de atenção** deve reunir erros, conflitos e exclusões pendentes do bucket selecionado, contando cada chave uma única vez. As ações de revisão permanecem disponíveis mesmo quando a chave não aparece na lista de arquivos monitorados.
 
 ---
 

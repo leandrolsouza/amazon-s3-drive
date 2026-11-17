@@ -8,7 +8,11 @@ import { useSyncStore } from "../store";
 import { syncPresentation } from "../syncPresentation";
 import { runSyncCommand } from "../syncCommands";
 import { DeleteConfirmation } from "../components/DeleteConfirmation";
+import { BucketActivitySummary, filesNeedingAttention } from "../components/BucketActivitySummary";
+import { TrashDialog } from "../components/TrashDialog";
+import { ConflictNotifications } from "../components/NotificationHandler";
 import {
+  DeletionReview,
   FileStatus,
   ObjectDetailedMetadata,
   QueueStats,
@@ -135,19 +139,26 @@ function splitPath(fullPath: string): { dir: string; base: string } {
   };
 }
 
-export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => void }> = ({
+const noDeletionReviews: DeletionReview[] = [];
+const ROWS_PER_PAGE = 100;
+
+export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => void; reviews?: DeletionReview[] }> = ({
   active = true,
   onOpenSettings,
+  reviews = noDeletionReviews,
 }) => {
   const config = useSyncStore((s) => s.config);
   const configured = Boolean(config?.bucket_name.trim() && config.local_path.trim());
   const canUpload = canImportFiles(config);
   const fileStatuses = useSyncStore((s) => s.fileStatuses);
+  const conflicts = useSyncStore((s) => s.conflicts);
+  const [lastSync, setLastSync] = useState<string | null>();
   const transferProgress = useSyncStore((s) => s.transferProgress);
   const badge = syncPresentation(useSyncStore());
   const syncAction = useSyncStore((s) => s.syncAction);
   const syncRunning = useSyncStore((s) => s.syncRunning);
   const [pendingDelete, setPendingDelete] = useState<string[] | null>(null);
+  const [trashOpen, setTrashOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(false);
   const queueStats = useSyncStore((s) => s.queueStats);
@@ -157,10 +168,12 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
   const [searchQuery, setSearchQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
   const [stateFilter, setStateFilter] = useState<
-    "ALL" | "Synced" | "Active" | "Error"
+    "ALL" | "Synced" | "Active" | "Error" | "Attention"
   >("ALL");
   const [viewMode, setViewMode] = useState<"flat" | "tree">("tree");
   const [currentFolder, setCurrentFolder] = useState<string>("");
+  const [pageIndex, setPageIndex] = useState(0);
+  const tableViewport = useRef<HTMLDivElement>(null);
   const [uploadPaths, setUploadPaths] = useState<string[] | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
@@ -213,6 +226,27 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
       .catch(() => {});
     return () => { disposed = true; };
   }, [active, setFileStatuses, setQueueStats, syncRunning]);
+
+  useEffect(() => {
+    if (!active || !configured) return;
+    let disposed = false;
+    let loading = false;
+    const refresh = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const time = await invoke<string | null>("get_last_file_sync_time");
+        if (!disposed && (time === null || typeof time === "string")) setLastSync(time);
+      } catch {
+        if (!disposed) setLastSync(undefined);
+      } finally {
+        loading = false;
+      }
+    };
+    void refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [active, configured]);
 
   useEffect(() => {
     if (!active || !canUpload) {
@@ -293,15 +327,20 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
     return { total, synced, syncing, pending, errors };
   }, [fileStatuses]);
 
+  const attentionKeys = useMemo(
+    () => filesNeedingAttention(fileStatuses, conflicts, reviews),
+    [fileStatuses, conflicts, reviews],
+  );
+
   const filteredFiles = useMemo(() => {
+    const search = searchQuery.trim() ? searchQuery.toLowerCase() : "";
     const list = fileStatuses.filter((file) => {
       const matchesSearch =
-        !searchQuery.trim() ||
-        file.path.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesFilter =
-        stateFilter === "ALL" || (stateFilter === "Active"
-          ? file.state.type === "Syncing" || file.state.type === "Pending"
-          : file.state.type === stateFilter);
+        !search || file.path.toLowerCase().includes(search);
+      const matchesFilter = stateFilter === "ALL"
+        || (stateFilter === "Attention" && attentionKeys.has(file.path))
+        || (stateFilter === "Active" && (file.state.type === "Syncing" || file.state.type === "Pending"))
+        || file.state.type === stateFilter;
       if (!matchesSearch || !matchesFilter) return false;
       if (viewMode === "tree" && currentFolder) {
         return file.path.startsWith(currentFolder);
@@ -310,7 +349,7 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
     });
 
     const dirMult = sortAsc ? 1 : -1;
-    return [...list].sort((a, b) => {
+    return list.sort((a, b) => {
       if (sortField === "size") {
         return ((a.size_bytes || 0) - (b.size_bytes || 0)) * dirMult;
       }
@@ -326,6 +365,7 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
     });
   }, [
     fileStatuses,
+    attentionKeys,
     searchQuery,
     stateFilter,
     viewMode,
@@ -369,6 +409,30 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
 
     return { folders, files: directFiles };
   }, [viewMode, filteredFiles, currentFolder]);
+
+  const { folders, files: visibleFileRows } = treeEntries;
+  const rowCount = folders.length + visibleFileRows.length;
+  const pageCount = Math.max(1, Math.ceil(rowCount / ROWS_PER_PAGE));
+  const currentPageIndex = Math.min(pageIndex, pageCount - 1);
+  const pageStart = currentPageIndex * ROWS_PER_PAGE;
+  const pageEnd = Math.min(pageStart + ROWS_PER_PAGE, rowCount);
+  const pageFolders = folders.slice(pageStart, pageEnd);
+  const pageFiles = visibleFileRows.slice(
+    Math.max(0, pageStart - folders.length),
+    Math.max(0, pageEnd - folders.length),
+  );
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [searchQuery, stateFilter, viewMode, currentFolder, sortField, sortAsc]);
+
+  useEffect(() => {
+    setPageIndex((index) => Math.min(index, pageCount - 1));
+  }, [pageCount]);
+
+  useEffect(() => {
+    if (tableViewport.current) tableViewport.current.scrollTop = 0;
+  }, [currentPageIndex, searchQuery, stateFilter, viewMode, currentFolder, sortField, sortAsc]);
 
   const breadcrumbSegments = useMemo(() => {
     if (!currentFolder) return [];
@@ -535,8 +599,6 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
     );
   };
 
-  const visibleFileRows =
-    viewMode === "tree" ? treeEntries.files : filteredFiles;
   const hasFilters = Boolean(searchQuery.trim()) || stateFilter !== "ALL";
   const noResults = filteredFiles.length === 0 && (hasFilters || Boolean(currentFolder));
   const clearFilters = () => {
@@ -545,9 +607,11 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
     searchInput.current?.focus();
   };
 
-  const allVisibleSelected =
-    visibleFileRows.length > 0 &&
-    visibleFileRows.every((f) => selectedBatchKeys.includes(f.path));
+  const selectedBatchSet = useMemo(() => new Set(selectedBatchKeys), [selectedBatchKeys]);
+  const allVisibleSelected = useMemo(() =>
+    visibleFileRows.length > 0 && visibleFileRows.every((file) => selectedBatchSet.has(file.path)),
+    [visibleFileRows, selectedBatchSet],
+  );
 
   const handleToggleAllVisible = () => {
     if (allVisibleSelected) {
@@ -662,6 +726,15 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
         <DeleteConfirmation keysToDelete={pendingDelete} busy={deleting} failed={deleteError} onCancel={() => setPendingDelete(null)} onConfirm={handleConfirmDelete} />,
         document.body,
       )}
+      {active && trashOpen && config && (
+        <TrashDialog bucket={config.bucket_name} prefix={config.s3_prefix} formatSize={formatBytes}
+          onClose={() => setTrashOpen(false)} onRestored={() => {
+            const scope = useSyncStore.getState().config;
+            void invoke<FileStatus[]>("get_sync_status").then((files) => {
+              if (Array.isArray(files) && useSyncStore.getState().config === scope) setFileStatuses(files);
+            }).catch(() => {});
+          }} />
+      )}
       <header className="command-bar object-command-bar">
         <div className="command-bar-left">
           <h2 className="pane-title">{t("Files & Transfers")}</h2>
@@ -675,6 +748,9 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
                 {t("Upload files")}
               </button>
             )}
+            {configured && <button type="button" className="btn-compact" onClick={() => setTrashOpen(true)}>
+              {t("Trash")}
+            </button>}
           </div>
         </div>
 
@@ -877,6 +953,28 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
         </div>
       )}
 
+      {config?.bucket_name && (
+        <BucketActivitySummary
+          bucket={config.bucket_name}
+          prefix={config.s3_prefix}
+          lastSync={lastSync}
+          activeCount={counts.syncing + counts.pending}
+          attentionCount={attentionKeys.size}
+          filter={stateFilter}
+          onFilter={(filter) => {
+            setStateFilter(stateFilter === filter ? "ALL" : filter);
+            setSearchQuery("");
+            setCurrentFolder("");
+            setViewMode("flat");
+          }}
+        />
+      )}
+      {stateFilter === "Attention" && config?.notifications.conflict_enabled === false && conflicts.length > 0 && (
+        <div className="notification-container">
+          <ConflictNotifications />
+        </div>
+      )}
+
       {queueStats.is_full && (
         <div role="alert" className="banner banner-error">
           {t("The queue has reached its limit of 10,000 operations. New operations were blocked.")}
@@ -939,7 +1037,9 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
       {noResults ? (
         <div className="empty-table-view" role="region" aria-label={t("File list")}>
           <p className="empty-status" role="status">
-            {hasFilters ? t("No files match these filters.") : t("This folder has no tracked files yet.")}
+            {stateFilter === "Attention" && !searchQuery.trim()
+              ? t(attentionKeys.size ? "Review the pending items above." : "No files need attention.")
+              : hasFilters ? t("No files match these filters.") : t("This folder has no tracked files yet.")}
           </p>
           {hasFilters && <button type="button" className="btn-compact" onClick={clearFilters}>{t("Clear filters")}</button>}
         </div>
@@ -958,7 +1058,8 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
         </div>
       ) : (
         <div className="status-split-body">
-          <div className="table-viewport">
+          <div className="table-panel">
+          <div className="table-viewport" ref={tableViewport}>
             <div className="table-head">
               <button
                 type="button"
@@ -980,7 +1081,8 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
                   checked={allVisibleSelected}
                   onChange={handleToggleAllVisible}
                   onClick={(e) => e.stopPropagation()}
-                  aria-label={t("Select all visible files")}
+                  aria-label={pageCount > 1 ? t("Select all files in the result") : t("Select all visible files")}
+                  title={pageCount > 1 ? t("Select all files in the result") : undefined}
                 />
                 {t("S3 OBJECT KEY")}{" "}
                 {sortField === "path" ? (sortAsc ? "▲" : "▼") : ""}
@@ -1004,8 +1106,7 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
             </div>
 
             <ul className="file-status-list" aria-label={t("File list")}>
-              {viewMode === "tree" &&
-                treeEntries.folders.map((folder) => (
+              {pageFolders.map((folder) => (
                   <li
                     key={`folder-${folder.prefix}`}
                     className="table-row folder-row"
@@ -1047,7 +1148,7 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
                   </li>
                 ))}
 
-              {(viewMode === "tree" ? treeEntries.files : filteredFiles).map(
+              {pageFiles.map(
                 (file) => {
                   const meta = renderStateMeta(file.state);
                   const { dir, base } = splitPath(file.path);
@@ -1089,7 +1190,7 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
                         <input
                           type="checkbox"
                           className="row-check"
-                          checked={selectedBatchKeys.includes(file.path)}
+                          checked={selectedBatchSet.has(file.path)}
                           onChange={() => handleToggleBatchKey(file.path)}
                           onClick={(e) => e.stopPropagation()}
                           aria-label={t("Select {0}", file.path)}
@@ -1178,6 +1279,18 @@ export const StatusView: React.FC<{ active?: boolean; onOpenSettings?: () => voi
                 }
               )}
             </ul>
+          </div>
+          {pageCount > 1 && (
+            <nav className="file-pagination" aria-label={t("File list pages")}>
+              <span role="status">{t("Items {0}–{1} of {2}", pageStart + 1, pageEnd, rowCount)}</span>
+              <div className="file-pagination-controls">
+                <button type="button" className="btn-compact" disabled={currentPageIndex === 0}
+                  onClick={() => setPageIndex(currentPageIndex - 1)}>{t("Previous page")}</button>
+                <button type="button" className="btn-compact" disabled={currentPageIndex === pageCount - 1}
+                  onClick={() => setPageIndex(currentPageIndex + 1)}>{t("Next page")}</button>
+              </div>
+            </nav>
+          )}
           </div>
 
           {selectedFileKey && (

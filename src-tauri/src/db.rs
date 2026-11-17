@@ -92,6 +92,14 @@ impl Database {
         Arc::clone(&self.conn)
     }
 
+    pub fn last_file_sync_time(&self) -> Result<Option<String>, rusqlite::Error> {
+        self.conn.lock().unwrap().query_row(
+            "SELECT MAX(last_sync_time) FROM file_registry",
+            [],
+            |row| row.get(0),
+        )
+    }
+
     // === Operações em file_registry ===
 
     pub fn upsert_file_entry(&self, entry: &FileEntry) -> Result<(), rusqlite::Error> {

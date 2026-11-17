@@ -58,12 +58,35 @@ const initialState = {
   syncAction: null,
 };
 
+export function syncScope(config: AppConfig | null) {
+  return JSON.stringify([
+    config?.bucket_name.trim(),
+    config?.local_path.trim(),
+    config?.s3_prefix?.replace(/^\/+|\/+$/g, "") || "",
+    config?.aws_region.trim(),
+    config?.endpoint_url?.replace(/^\/+|\/+$/g, "") || "",
+  ]);
+}
+
 export const useSyncStore = create<SyncStoreState>((set) => ({
   ...initialState,
   setSyncRunning: (syncRunning) => set({ syncRunning }),
   setSyncAction: (syncAction) => set({ syncAction }),
 
-  setConfig: (config) => set({ config }),
+  setConfig: (config) => set((previous) => {
+    if (previous.config && syncScope(previous.config) !== syncScope(config)) {
+      return {
+        config,
+        fileStatuses: [],
+        conflicts: [],
+        errors: [],
+        transferProgress: {},
+        queueStats: initialState.queueStats,
+        globalState: computeFrontendGlobalState([], previous.isOnline),
+      };
+    }
+    return { config };
+  }),
 
   setGlobalState: (globalState) => set({ globalState }),
 

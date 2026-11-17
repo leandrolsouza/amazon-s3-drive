@@ -1,6 +1,6 @@
 use amazon_s3_drive_lib::{
     db::Database,
-    models::{AppConfig, FileEntry, LocalFsEvent, SyncOperation, SyncOperationType, SyncState},
+    models::{AppConfig, FileEntry, LocalFsEvent, SyncOperation, SyncOperationType, SyncState, TrashRestore, TrashSource},
     network_detector::NetworkDetector,
     queue_manager::QueueManager,
     s3_client::{compute_md5_bytes, MockObject, MockS3Backend, S3Client},
@@ -216,6 +216,35 @@ async fn confirmed_deletion_preserves_remote_copy_and_does_not_redownload_trash(
         .get_file_entry_by_key("documents/test.txt")
         .unwrap()
         .is_none());
+
+    let listing = engine.list_trash().await;
+    assert_eq!(listing.entries.len(), 1);
+    let entry = &listing.entries[0];
+    assert_eq!(entry.source, TrashSource::Remote);
+    assert_eq!(entry.original_key.as_deref(), Some("documents/test.txt"));
+
+    fs::write(f.local(), b"new local file").unwrap();
+    assert!(matches!(
+        engine.restore_trash(entry.source, &entry.locator, None).await.unwrap(),
+        TrashRestore::Blocked { local: true, remote: false }
+    ));
+    assert_eq!(fs::read(f.local()).unwrap(), b"new local file");
+    fs::remove_file(f.local()).unwrap();
+    f.remote_write(b"new S3 object");
+    assert!(matches!(
+        engine.restore_trash(entry.source, &entry.locator, None).await.unwrap(),
+        TrashRestore::Blocked { local: false, remote: true }
+    ));
+    assert_eq!(f.remote.lock().unwrap().objects["documents/test.txt"].bytes, b"new S3 object");
+    f.remote.lock().unwrap().objects.remove("documents/test.txt");
+
+    assert!(matches!(
+        engine.restore_trash(entry.source, &entry.locator, None).await.unwrap(),
+        TrashRestore::Restored { backup_retained: false }
+    ));
+    assert_eq!(fs::read(f.local()).unwrap(), b"original");
+    assert_eq!(f.remote.lock().unwrap().objects["documents/test.txt"].bytes, b"original");
+    assert!(engine.list_trash().await.entries.is_empty());
 }
 
 #[tokio::test]
@@ -234,6 +263,34 @@ async fn delete_versus_remote_edit_requires_review_and_stale_decisions_are_rejec
     assert!(engine.resolve_deletion(&old, false).await.is_err());
     engine.resolve_deletion(&current, true).await.unwrap();
     assert_eq!(fs::read(f.local()).unwrap(), b"edited");
+}
+
+#[tokio::test]
+async fn watcher_reports_local_deletion_conflicting_with_remote_edit_before_next_poll() {
+    let mut f = Fixture::new();
+    f.config.sync_interval_secs = 60;
+    f.synced();
+    let engine = f.engine();
+    engine.start().await.unwrap();
+    f.remote_write(b"edited in S3");
+    fs::remove_file(f.local()).unwrap();
+
+    let review = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(review) = engine.deletion_reviews().unwrap().pop() {
+                break review;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the watcher should reconcile the deletion without waiting for the poll interval");
+    assert_eq!(review.deleted_side, "local");
+    assert!(review.other_side_changed);
+    assert_eq!(engine.queue_manager().count_pending().unwrap(), 0);
+    assert!(!f.local().exists());
+    assert_eq!(f.remote.lock().unwrap().objects["documents/test.txt"].bytes, b"edited in S3");
+    engine.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -266,26 +323,54 @@ async fn confirmed_remote_deletion_moves_local_version_to_recovery_folder() {
     let review = engine.deletion_reviews().unwrap().remove(0);
     engine.resolve_deletion(&review, false).await.unwrap();
     assert!(!f.local().exists());
-    let folder = fs::read_dir(f.dir.path().join("files/.s3-drive-trash"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    assert_eq!(fs::read(folder.join("test.txt")).unwrap(), b"original");
+    let listing = engine.list_trash().await;
+    assert_eq!(listing.entries.len(), 1);
+    let entry = &listing.entries[0];
+    assert_eq!(entry.source, TrashSource::Local);
+    assert_eq!(entry.original_key.as_deref(), Some("documents/test.txt"));
+    let backup = f.dir.path().join("files/.s3-drive-trash").join(&entry.locator);
+    assert_eq!(fs::read(&backup).unwrap(), b"original");
     engine
         .process_local_event(LocalFsEvent::Renamed {
             from: f.local(),
-            to: folder.join("test.txt"),
+            to: backup.clone(),
         })
         .await
         .unwrap();
     engine
-        .process_local_event(LocalFsEvent::Created(folder.join("test.txt")))
+        .process_local_event(LocalFsEvent::Created(backup))
         .await
         .unwrap();
     engine.scan_local_directory().await.unwrap();
     assert_eq!(engine.queue_manager().count_pending().unwrap(), 0);
+    assert!(matches!(
+        engine.restore_trash(entry.source, &entry.locator, None).await.unwrap(),
+        TrashRestore::Restored { backup_retained: false }
+    ));
+    assert_eq!(fs::read(f.local()).unwrap(), b"original");
+    assert_eq!(f.remote.lock().unwrap().objects["documents/test.txt"].bytes, b"original");
+    assert!(engine.list_trash().await.entries.is_empty());
+}
+
+#[tokio::test]
+async fn restores_a_legacy_local_copy_only_to_an_explicit_scoped_path() {
+    let f = Fixture::new();
+    let root = f.dir.path().join("files/.s3-drive-trash/1700000000000000000");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("test.txt"), b"legacy").unwrap();
+    let engine = f.engine();
+    let listing = engine.list_trash().await;
+    let entry = &listing.entries[0];
+    assert!(entry.original_key.is_none());
+    for invalid in [None, Some("../test.txt"), Some("docs/")] {
+        assert!(engine.restore_trash(entry.source, &entry.locator, invalid).await.is_err());
+    }
+    assert!(matches!(
+        engine.restore_trash(entry.source, &entry.locator, Some("docs/test.txt")).await.unwrap(),
+        TrashRestore::Restored { backup_retained: false }
+    ));
+    assert_eq!(fs::read(f.dir.path().join("files/docs/test.txt")).unwrap(), b"legacy");
+    assert_eq!(f.remote.lock().unwrap().objects["documents/docs/test.txt"].bytes, b"legacy");
 }
 
 #[tokio::test]

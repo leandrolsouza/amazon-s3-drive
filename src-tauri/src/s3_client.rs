@@ -530,6 +530,12 @@ impl S3Client {
     }
 
     pub async fn copy_object(&self, src: &str, dst: &str) -> Result<(), S3Error> {
+        self.copy_object_matching(src, dst, None).await
+    }
+
+    pub(crate) async fn copy_object_matching(
+        &self, src: &str, dst: &str, etag: Option<&str>,
+    ) -> Result<(), S3Error> {
         match &self.backend {
             ClientBackend::Aws(client) => {
                 let copy_source: String = format!("{}/{}", self.bucket, src)
@@ -547,9 +553,13 @@ impl S3Client {
                     .bucket(&self.bucket)
                     .copy_source(copy_source)
                     .key(dst)
+                    .set_copy_source_if_match(etag.map(|tag| format!("\"{}\"", normalize_etag(tag))))
                     .send()
                     .await
-                    .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                    .map_err(|e| match e.raw_response().map(|r| r.status().as_u16()) {
+                        Some(404 | 412) if etag.is_some() => S3Error::PreconditionFailed,
+                        _ => S3Error::Sdk(e.to_string()),
+                    })?;
                 Ok(())
             }
             ClientBackend::Mock(mock) => {
@@ -558,7 +568,10 @@ impl S3Client {
                     .objects
                     .get(src)
                     .cloned()
-                    .ok_or_else(|| S3Error::Sdk(format!("Source key not found: {}", src)))?;
+                    .ok_or(S3Error::ObjectNotFound)?;
+                if etag.is_some_and(|tag| normalize_etag(tag) != normalize_etag(&existing.etag)) {
+                    return Err(S3Error::PreconditionFailed);
+                }
                 guard.objects.insert(dst.to_string(), existing);
                 Ok(())
             }
@@ -566,6 +579,18 @@ impl S3Client {
     }
 
     pub async fn upload_file(&self, key: &str, path: &Path) -> Result<String, S3Error> {
+        self.put_file(key, path, false).await
+    }
+
+    pub(crate) async fn upload_if_absent(&self, key: &str, path: &Path) -> Result<String, S3Error> {
+        let size = fs::metadata(path).map_err(|err| S3Error::Io(err.to_string()))?.len();
+        if Self::requires_multipart(size) {
+            return self.upload_parts(key, path, None, |_, _| {}, true).await;
+        }
+        self.put_file(key, path, true).await
+    }
+
+    async fn put_file(&self, key: &str, path: &Path, create_only: bool) -> Result<String, S3Error> {
         let bytes = fs::read(path).map_err(|e| S3Error::Io(e.to_string()))?;
         self.apply_bandwidth_throttle(bytes.len() as u64).await;
         let computed_etag = compute_md5_bytes(&bytes);
@@ -578,11 +603,15 @@ impl S3Client {
                     .bucket(&self.bucket)
                     .key(key)
                     .storage_class(self.sdk_storage_class())
+                    .set_if_none_match(create_only.then(|| "*".to_string()))
                     .body(body);
                 if self.server_side_encryption {
                     req = req.server_side_encryption(ServerSideEncryption::Aes256);
                 }
-                let resp = req.send().await.map_err(|e| S3Error::Sdk(e.to_string()))?;
+                let resp = req.send().await.map_err(|e| match e.raw_response().map(|r| r.status().as_u16()) {
+                    Some(409 | 412) if create_only => S3Error::PreconditionFailed,
+                    _ => S3Error::Sdk(e.to_string()),
+                })?;
                 let etag = resp.e_tag().map(normalize_etag).unwrap_or(computed_etag);
                 Ok(etag)
             }
@@ -590,6 +619,9 @@ impl S3Client {
                 let mut guard = mock.lock().unwrap();
                 if guard.fail_auth {
                     return Err(S3Error::Auth("AccessDenied".to_string()));
+                }
+                if create_only && guard.objects.contains_key(key) {
+                    return Err(S3Error::PreconditionFailed);
                 }
                 guard.objects.insert(
                     key.to_string(),
@@ -619,7 +651,21 @@ impl S3Client {
         key: &str,
         path: &Path,
         resume: Option<MultipartState>,
+        on_progress: F,
+    ) -> Result<String, S3Error>
+    where
+        F: FnMut(u64, u64),
+    {
+        self.upload_parts(key, path, resume, on_progress, false).await
+    }
+
+    async fn upload_parts<F>(
+        &self,
+        key: &str,
+        path: &Path,
+        resume: Option<MultipartState>,
         mut on_progress: F,
+        create_only: bool,
     ) -> Result<String, S3Error>
     where
         F: FnMut(u64, u64),
@@ -663,9 +709,31 @@ impl S3Client {
             }
         };
 
-        if let Some(db) = &self.db {
+        let db = self.db.as_ref().filter(|_| !create_only);
+        if let Some(db) = db {
             let _ = db.save_multipart_state(&state);
         }
+
+        let result = self.send_parts(key, path, parts, file_size, &mut state, &mut on_progress, create_only).await;
+        if create_only && result.is_err() {
+            if let ClientBackend::Aws(client) = &self.backend {
+                let _ = client.abort_multipart_upload()
+                    .bucket(&self.bucket).key(key).upload_id(&state.upload_id)
+                    .send().await;
+            }
+        }
+        if result.is_ok() {
+            if let Some(db) = db {
+                let _ = db.delete_multipart_state(key);
+            }
+        }
+        result
+    }
+
+    async fn send_parts(
+        &self, key: &str, path: &Path, parts: Vec<PartRange>, file_size: u64,
+        state: &mut MultipartState, on_progress: &mut impl FnMut(u64, u64), create_only: bool,
+    ) -> Result<String, S3Error> {
 
         let mut file = File::open(path).map_err(|e| S3Error::Io(e.to_string()))?;
         let mut full_bytes_for_mock = Vec::new();
@@ -728,8 +796,8 @@ impl S3Client {
             on_progress(bytes_sent, file_size);
             self.apply_bandwidth_throttle(part.size).await;
 
-            if let Some(db) = &self.db {
-                let _ = db.save_multipart_state(&state);
+            if let Some(db) = self.db.as_ref().filter(|_| !create_only) {
+                let _ = db.save_multipart_state(state);
             }
         }
 
@@ -756,15 +824,22 @@ impl S3Client {
                     .key(key)
                     .upload_id(&state.upload_id)
                     .multipart_upload(completed_upload)
+                    .set_if_none_match(create_only.then(|| "*".to_string()))
                     .send()
                     .await
-                    .map_err(|e| S3Error::Sdk(e.to_string()))?;
+                    .map_err(|e| match e.raw_response().map(|r| r.status().as_u16()) {
+                        Some(409 | 412) if create_only => S3Error::PreconditionFailed,
+                        _ => S3Error::Sdk(e.to_string()),
+                    })?;
 
                 resp.e_tag().map(normalize_etag).unwrap_or_default()
             }
             ClientBackend::Mock(mock) => {
                 let etag = compute_md5_bytes(&full_bytes_for_mock);
                 let mut guard = mock.lock().unwrap();
+                if create_only && guard.objects.contains_key(key) {
+                    return Err(S3Error::PreconditionFailed);
+                }
                 guard
                     .multipart_uploads
                     .push((key.to_string(), state.completed_parts.clone()));
@@ -779,10 +854,6 @@ impl S3Client {
                 etag
             }
         };
-
-        if let Some(db) = &self.db {
-            let _ = db.delete_multipart_state(key);
-        }
 
         Ok(final_etag)
     }
@@ -800,6 +871,14 @@ impl S3Client {
             }
         }
 
+        let (temp, etag) = self.download_to_temp(key, dest).await?;
+        temp.persist(dest).map_err(|e| S3Error::Io(e.to_string()))?;
+        Ok(etag)
+    }
+
+    pub(crate) async fn download_to_temp(
+        &self, key: &str, dest: &Path,
+    ) -> Result<(tempfile::NamedTempFile, String), S3Error> {
         let mut temp = transfer_temp_file(dest)?;
 
         let expected_etag = match &self.backend {
@@ -880,8 +959,7 @@ impl S3Client {
             .map_err(|e| S3Error::Io(e.to_string()))?
             .len();
         self.apply_bandwidth_throttle(downloaded_len).await;
-        temp.persist(dest).map_err(|e| S3Error::Io(e.to_string()))?;
-        Ok(expected_etag)
+        Ok((temp, expected_etag))
     }
 
     /// Gera uma URL pré-assinada (Presigned URL) temporária para compartilhamento/download direto do objeto S3

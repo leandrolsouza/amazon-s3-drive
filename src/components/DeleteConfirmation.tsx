@@ -25,7 +25,7 @@ export function DeleteConfirmation({ keysToDelete, busy, failed, onCancel, onCon
     <dialog ref={dialog} className="delete-confirmation" aria-labelledby="delete-title" aria-describedby="delete-description"
       onCancel={(event) => { event.preventDefault(); if (!busy) onCancel(); }}>
       <h2 id="delete-title">{t("Delete") + " "}{keysToDelete.length} {t("file(s)?")}</h2>
-      <p id="delete-description">{t("The files will be deleted from the local folder, and their removal from the S3 bucket will be queued. This action cannot be undone in the app.")}</p>
+      <p id="delete-description">{t("Local files will move to the trash. S3 removal will be queued, and the remote copy will be kept in the trash before removal.")}</p>
       <p>{t("Folder:") + " "}{config?.local_path || t("Configured folder")}<br />{t("Destination:") + " "}{config?.bucket_name ? `s3://${config.bucket_name}/${config.s3_prefix || ""}` : t("Configured bucket")}</p>
       <ul>{keysToDelete.map((key) => <li key={key}>{key}</li>)}</ul>
       {failed && <p role="alert">{t("Could not complete deletion. Some files may already have been removed. Check the status before trying again.")}</p>}

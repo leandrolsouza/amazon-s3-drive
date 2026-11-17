@@ -50,6 +50,7 @@ export interface FileStatus {
 }
 
 export interface ConflictEvent {
+  s3_key?: string;
   file_name: string;
   local_path: string;
   conflict_copy_path: string;
@@ -188,3 +189,22 @@ export interface DeletionReview {
   queued?: boolean;
   local_hash: string | null;
 }
+
+export interface TrashEntry {
+  source: "local" | "remote";
+  locator: string;
+  original_key: string | null;
+  file_name: string;
+  deleted_at: string;
+  size_bytes: number;
+}
+
+export interface TrashListing {
+  entries: TrashEntry[];
+  local_error: string | null;
+  remote_error: string | null;
+}
+
+export type TrashRestore =
+  | { status: "restored"; backup_retained: boolean }
+  | { status: "blocked"; local: boolean; remote: boolean };

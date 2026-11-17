@@ -22,11 +22,10 @@ impl SyncEngine {
         .collect()
     }
 
-    pub(super) fn review_deletion(
+    pub(super) fn review_queued_deletion(
         &self,
         entry: &FileEntry,
-        remote: Option<&crate::models::S3ObjectInfo>,
-        queued: bool,
+        remote: &crate::models::S3ObjectInfo,
     ) -> Result<(), SyncError> {
         let local_hash = if Path::new(&entry.local_path)
             .try_exists()
@@ -36,19 +35,23 @@ impl SyncEngine {
         } else {
             None
         };
+        self.save_deletion_review(entry, Some(remote), local_hash, true, true)
+    }
+
+    pub(super) fn save_deletion_review(
+        &self,
+        entry: &FileEntry,
+        remote: Option<&crate::models::S3ObjectInfo>,
+        local_hash: Option<String>,
+        queued: bool,
+        other_side_changed: bool,
+    ) -> Result<(), SyncError> {
         let review = DeletionReview {
             s3_key: entry.s3_key.clone(),
             local_path: entry.local_path.clone(),
             deleted_side: if remote.is_some() { "local" } else { "remote" }.into(),
             queued,
-            other_side_changed: queued
-                || match remote {
-                    Some(obj) => entry.last_sync_etag.as_ref() != Some(&obj.etag),
-                    None => {
-                        local_hash.as_ref()
-                            != entry.local_hash.as_ref().or(entry.last_sync_etag.as_ref())
-                    }
-                },
+            other_side_changed,
             remote_etag: remote.map(|obj| obj.etag.clone()),
             local_hash,
         };
@@ -101,7 +104,7 @@ impl SyncEngine {
         let _guard = self.reconciliation_lock.lock().await;
         let key = expected.s3_key.as_str();
         let cfg = self.get_config();
-        let relative_key = scoped_key(key, &cfg)?;
+        scoped_key(key, &cfg)?;
         if !expected.queued && !cfg.sync_direction.eq_ignore_ascii_case("Bidirectional") {
             return Err(SyncError::Conflict(
                 tr("The sync direction changed. Review the settings.", "A direção da sincronização mudou. Revise a configuração.").into(),
@@ -150,7 +153,6 @@ impl SyncEngine {
         {
             return Err(SyncError::Conflict(tr("The file changed since the review. Wait for the next scan and review it again.", "O arquivo mudou desde a revisão. Aguarde a próxima verificação e revise novamente.").into()));
         }
-        let stamp = Utc::now().timestamp_nanos_opt().unwrap_or_default();
         if restore {
             let op = SyncOperation {
                 operation_type: if review.deleted_side == "local" {
@@ -167,31 +169,9 @@ impl SyncEngine {
         } else {
             // Preservar o conteúdo antes da exclusão; falhar sem remover se a cópia falhar.
             if review.deleted_side == "local" {
-                let trash_key =
-                    apply_s3_prefix(format!("{TRASH}/{stamp}/{relative_key}"), &cfg.s3_prefix);
-                client.copy_object(key, &trash_key).await?;
-                if client.head_object(key).await?.etag
-                    != review.remote_etag.clone().unwrap_or_default()
-                {
-                    return Err(SyncError::Conflict(
-                        tr("The remote version changed. Deletion was canceled.", "A versão remota mudou; exclusão cancelada.").into(),
-                    ));
-                }
-                client
-                    .delete_object_if_match(key, review.remote_etag.as_deref().unwrap_or_default())
-                    .await?;
+                self.trash_remote_revision(&cfg, &client, key, review.remote_etag.as_deref().unwrap_or_default()).await?;
             } else {
-                let trash_dir = Path::new(&cfg.local_path)
-                    .join(TRASH)
-                    .join(stamp.to_string());
-                require_local_path(&trash_dir, Path::new(&cfg.local_path))?;
-                fs::create_dir_all(&trash_dir).map_err(|e| SyncError::Io(e.to_string()))?;
-                let name = path
-                    .file_name()
-                    .ok_or_else(|| SyncError::Io(tr("Invalid name.", "Nome inválido.").into()))?;
-                let trash_path = trash_dir.join(name);
-                require_local_path(&trash_path, Path::new(&cfg.local_path))?;
-                fs::rename(path, trash_path).map_err(|e| SyncError::Io(e.to_string()))?;
+                self.move_to_local_trash(&cfg, key, path)?;
             }
             self.db
                 .delete_file_entry(key)

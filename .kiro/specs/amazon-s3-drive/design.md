@@ -6,7 +6,11 @@
 
 `get_deletion_reviews` retorna pendências persistidas à interface, consultadas a cada dois segundos por `DeletionReviewPanel`. `resolve_deletion(review, restore)` recebe a revisão completa exibida, compara-a com a persistida e revalida os conteúdos. Um mutex serializa decisões e polling. Alterações concorrentes invalidam a decisão; a exclusão remota usa `If-Match` com o ETag aprovado.
 
-Restaurar significa baixar se o lado excluído é local ou enviar se o lado excluído é remoto. Confirmar significa copiar o objeto remoto para `<prefixo>/.s3-drive-trash/<timestamp>/<chave>` antes de apagar, ou mover o arquivo local para `<pasta>/.s3-drive-trash/<timestamp>/<nome>`. Cópias internas não entram na sincronização. Falhas de cópia impedem a remoção; não há coleta automática dessas cópias nem interface de recuperação nesta etapa. O backend exige permissão de cópia/leitura e gravação no prefixo de recuperação. A troca de identidade da configuração limpa as pendências junto com o restante do estado.
+Na revisão de exclusão pendente, restaurar significa baixar se o lado excluído é local ou enviar se o lado excluído é remoto. Confirmar copia o objeto remoto para `<prefixo>/.s3-drive-trash/<timestamp>/<chave relativa>` antes de apagar, ou move o arquivo local para `<pasta>/.s3-drive-trash/<timestamp>/content/<nome>` com um registro da chave original. As exclusões iniciadas pelo usuário também preservam as versões existentes. Cópias internas ficam fora da sincronização e falhas de cópia impedem a remoção. O backend exige leitura e gravação no prefixo de recuperação. A troca de identidade da configuração limpa as pendências junto com o restante do estado.
+
+A interface da lixeira lista as cópias por bucket. A restauração revalida o escopo da chave e verifica o destino dos dois lados. A gravação no S3 é condicional à ausência da chave, inclusive no multipart, e a gravação local publica o arquivo temporário sem substituir um arquivo existente. A cópia só é removida depois de gravar nos dois lados e registrar a sincronização. Para uma cópia local antiga sem metadados, o usuário informa o caminho relativo.
+
+Na reconciliação, o motor coleta o registro da última sincronização, o estado local e o objeto listado no S3. Uma função pura compara esses dados com a direção configurada e devolve a ação. O motor executa a ação depois da decisão. A exclusão de um lado junto com edição do outro gera revisão de exclusão com conflito e preserva a versão restante até a decisão do usuário.
 
 Uma pasta raiz previamente sincronizada indisponível bloqueia o início em vez de ser recriada vazia. DownloadOnly restaura ausências locais e preserva uma cópia local antes de aplicar exclusões remotas; UploadOnly não infere exclusões locais feitas com o app fechado.
 
@@ -378,6 +382,10 @@ Localização do arquivo de configuração (via `dirs::config_dir()`):
 - **Linux**: `~/.config/amazon-s3-drive/config.json`
 
 ### StatusMonitor
+
+O resumo de atividade usa o registro SQLite do bucket para mostrar o horário mais recente de sincronização de um arquivo. A interface deduplica por chave S3 os arquivos com erro, os conflitos e as revisões de exclusão. As revisões mantêm suas ações próprias, inclusive quando o arquivo já saiu do monitor.
+
+A tela de arquivos filtra, ordena e agrupa o conjunto recebido antes de paginar a renderização. Cada página apresenta até 100 linhas, entre pastas e arquivos. A seleção em lote continua abrangendo os arquivos do resultado em todas as páginas.
 
 ```rust
 pub struct StatusMonitor {

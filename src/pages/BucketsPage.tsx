@@ -1,7 +1,10 @@
 import { FormEvent, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { DeletionReviewPanel } from "../components/DeletionReviewPanel";
-import type { AppConfig, ConflictEvent, FileStatus, GlobalSyncState } from "../types";
+import { BucketActivitySummary, filesNeedingAttention } from "../components/BucketActivitySummary";
+import { TrashDialog } from "../components/TrashDialog";
+import { formatBytes } from "./StatusView";
+import type { AppConfig, ConflictEvent, DeletionReview, FileStatus, GlobalSyncState } from "../types";
 import { t } from "../i18n";
 
 interface BucketSummary {
@@ -18,6 +21,7 @@ interface BucketSummary {
 }
 
 interface BucketDetails {
+  last_file_sync_time?: string | null;
   files: FileStatus[];
   logs: string[];
   conflicts: ConflictEvent[];
@@ -45,6 +49,9 @@ function BucketActivity({ bucket }: { bucket: BucketSummary }) {
   const [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [reviews, setReviews] = useState<DeletionReview[]>([]);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [filter, setFilter] = useState<"All" | "Active" | "Attention">("All");
   const { id } = bucket;
 
   useEffect(() => {
@@ -83,8 +90,22 @@ function BucketActivity({ bucket }: { bucket: BucketSummary }) {
     }
   }
 
+  const files = details?.files ?? [];
+  const activeFiles = files.filter((file) => file.state.type === "Pending" || file.state.type === "Syncing");
+  const attentionKeys = filesNeedingAttention(files, details?.conflicts ?? [], reviews);
+  const visibleFiles = filter === "Active" ? activeFiles
+    : filter === "Attention" ? files.filter((file) => attentionKeys.has(file.path)) : files;
+
   return <div className="bucket-activity">
-    <DeletionReviewPanel bucketId={id} paused={!bucket.running || bucket.busy} />
+    {trashOpen && <TrashDialog bucket={bucket.bucket_name} prefix={bucket.s3_prefix}
+      bucketId={id} formatSize={formatBytes} onClose={() => setTrashOpen(false)}
+      onRestored={() => setRevision((value) => value + 1)} />}
+    <BucketActivitySummary bucket={bucket.bucket_name} prefix={bucket.s3_prefix}
+      lastSync={details?.last_file_sync_time} activeCount={activeFiles.length}
+      attentionCount={attentionKeys.size} filter={filter}
+      onFilter={(next) => setFilter(filter === next ? "All" : next)} />
+    <button type="button" className="btn-compact" onClick={() => setTrashOpen(true)}>{t("Trash")}</button>
+    <DeletionReviewPanel bucketId={id} paused={!bucket.running || bucket.busy} onReviewsChange={setReviews} />
     {loadError && <p role="alert">{loadError}</p>}
     {actionError && <p role="alert">{actionError}</p>}
     {details?.conflicts.map((conflict) => <div className="banner banner-warning" key={conflict.conflict_copy_path}>
@@ -98,10 +119,12 @@ function BucketActivity({ bucket }: { bucket: BucketSummary }) {
     </div>)}
     {!details && !loadError && <p role="status">{t("Loading activity…")}</p>}
     {details && <>
-      <h4>{t("Files (")}{details.files.length})</h4>
-      {details.files.length === 0 ? <p>{t("No files in the sync monitor.")}</p> : (
+      <h4>{t("Files (")}{visibleFiles.length})</h4>
+      {visibleFiles.length === 0 ? <p>{filter === "Attention"
+        ? t(attentionKeys.size ? "Review the pending items above." : "No files need attention.")
+        : t(filter === "Active" ? "No files in progress." : "No files in the sync monitor.")}</p> : (
         <ul className="bucket-files">
-          {details.files.map((file) => <li key={file.path}>
+          {visibleFiles.map((file) => <li key={file.path}>
             <span className="mono">{file.path}</span>
             <span>{file.state.type === "Error" ? file.state.message : t(fileStatus[file.state.type])}</span>
           </li>)}
@@ -251,7 +274,7 @@ export function BucketsPage({ config, primaryStatus, onOpenPrimary, onOpenConfig
               </div>
             </div>
             {error && <p className="field-error" role="alert">{error}</p>}
-            {selected === bucket.id && <BucketActivity bucket={bucket} />}
+            {selected === bucket.id && <BucketActivity key={bucket.id} bucket={bucket} />}
           </article>;
         })}
       </section>

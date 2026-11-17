@@ -6,15 +6,11 @@ import { ConflictEvent } from "../types";
 import { t } from "../i18n";
 
 export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ onOpenConfig }) => {
-  const [resolutionErrors, setResolutionErrors] = useState<Record<string, string>>({});
-  const [resolving, setResolving] = useState<Record<string, boolean>>({});
   const config = useSyncStore((s) => s.config);
-  const conflicts = useSyncStore((s) => s.conflicts);
   const errors = useSyncStore((s) => s.errors);
   const initialCompleteCount = useSyncStore((s) => s.initialCompleteCount);
   const credentialAlert = useSyncStore((s) => s.credentialAlert);
 
-  const removeConflict = useSyncStore((s) => s.removeConflict);
   const dismissError = useSyncStore((s) => s.dismissError);
   const setInitialCompleteCount = useSyncStore((s) => s.setInitialCompleteCount);
 
@@ -32,30 +28,6 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
     }, 5500);
     return () => clearTimeout(timer);
   }, [initialCompleteCount, syncCompleteEnabled, setInitialCompleteCount]);
-
-  // Requisito 10.3: resolução de conflito via UI a partir da notificação
-  const handleResolveConflict = async (
-    conflict: ConflictEvent,
-    strategy: "local" | "remote" | "both"
-  ) => {
-    if (resolving[conflict.local_path]) return;
-    setResolving((prev) => ({ ...prev, [conflict.local_path]: true }));
-    setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: "" }));
-    try {
-      if (strategy === "local" || strategy === "remote") {
-        await invoke("resolve_conflict", {
-          strategy,
-          localPath: conflict.local_path,
-          conflictPath: conflict.conflict_copy_path,
-        });
-      }
-      removeConflict(conflict.local_path);
-    } catch {
-      setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: t("Could not resolve the conflict. Choose an option below to try again.") }));
-    } finally {
-      setResolving((prev) => ({ ...prev, [conflict.local_path]: false }));
-    }
-  };
 
   return (
     <div className="notification-container" aria-live="polite">
@@ -110,9 +82,44 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
           </div>
         ))}
 
+      {conflictEnabled && <ConflictNotifications />}
+    </div>
+  );
+};
+
+export function ConflictNotifications() {
+  const [resolutionErrors, setResolutionErrors] = useState<Record<string, string>>({});
+  const [resolving, setResolving] = useState<Record<string, boolean>>({});
+  const conflicts = useSyncStore((s) => s.conflicts);
+  const removeConflict = useSyncStore((s) => s.removeConflict);
+
+  // Requisito 10.3: resolução de conflito via UI a partir da notificação
+  const handleResolveConflict = async (
+    conflict: ConflictEvent,
+    strategy: "local" | "remote" | "both"
+  ) => {
+    if (resolving[conflict.local_path]) return;
+    setResolving((prev) => ({ ...prev, [conflict.local_path]: true }));
+    setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: "" }));
+    try {
+      if (strategy === "local" || strategy === "remote") {
+        await invoke("resolve_conflict", {
+          strategy,
+          localPath: conflict.local_path,
+          conflictPath: conflict.conflict_copy_path,
+        });
+      }
+      removeConflict(conflict.local_path);
+    } catch {
+      setResolutionErrors((prev) => ({ ...prev, [conflict.local_path]: t("Could not resolve the conflict. Choose an option below to try again.") }));
+    } finally {
+      setResolving((prev) => ({ ...prev, [conflict.local_path]: false }));
+    }
+  };
+
+  return <>
       {/* Conflitos detectados — persistente até seleção de opção (Requisito 10.3) */}
-      {conflictEnabled &&
-        conflicts.map((conflict) => (
+      {conflicts.map((conflict) => (
           <div
             key={conflict.local_path}
             role="alert"
@@ -152,6 +159,5 @@ export const NotificationHandler: React.FC<{ onOpenConfig?: () => void }> = ({ o
             </div>
           </div>
         ))}
-    </div>
-  );
-};
+  </>;
+}

@@ -126,6 +126,38 @@
 .delete-confirmation ul { max-height: 160px; overflow: auto; }
 .delete-confirmation button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
+.trash-dialog { width: min(650px, calc(100vw - 40px)); }
+.trash-heading, .trash-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.trash-heading { overflow-wrap: anywhere; }
+.trash-dialog .trash-list {
+  max-height: min(50vh, 380px);
+  padding: 0;
+  list-style: none;
+}
+.trash-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.trash-file, .trash-file label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.trash-file input {
+  width: 100%;
+  padding: 4px 6px;
+  color: var(--text-main);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+}
+.trash-file > span { font-size: 12px; }
+.trash-file [role="alert"] { color: var(--warn-fg); font-weight: 600; }
+
 html,
 body {
   margin: 0;
@@ -565,6 +597,33 @@ textarea {
   display: flex;
   min-height: 0;
   overflow: hidden;
+}
+
+.table-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.file-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-sec);
+  font-size: 12px;
+}
+
+.file-pagination-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .table-viewport {
@@ -1469,6 +1528,34 @@ input[type="number"]:focus {
 }
 
 .bucket-card h3,
+.bucket-activity-summary {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bucket-activity-location {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.bucket-activity-location strong {
+  max-width: 100%;
+}
+
+.bucket-activity-location span {
+  color: var(--text-muted);
+}
+
 .bucket-activity h4 {
   margin: 0 0 6px;
 }
