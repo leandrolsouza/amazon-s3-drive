@@ -27,16 +27,35 @@ pub fn tray_tooltip_for_state(state: &GlobalSyncState) -> &'static str {
     }
 }
 
-/// Gera um ícone RGBA 16x16 sólido para cada estado do tray (verde, azul frame 1/2, vermelho, cinza)
-pub fn make_solid_rgba_icon(r: u8, g: u8, b: u8) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(16 * 16 * 4);
-    for _ in 0..(16 * 16) {
-        rgba.push(r);
-        rgba.push(g);
-        rgba.push(b);
-        rgba.push(255);
+pub(crate) fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
-    rgba
+}
+
+fn tray_icon(logo: &Image<'_>, color: [u8; 4]) -> Image<'static> {
+    let mut rgba = logo.rgba().to_vec();
+    // Draw a dark outline so the status dot stays visible over the logo.
+    let center = 24;
+    for y in 17..=31 {
+        for x in 17..=31 {
+            let dx = x - center;
+            let dy = y - center;
+            let distance_squared = dx * dx + dy * dy;
+            if distance_squared <= 49 {
+                let pixel = if distance_squared <= 25 {
+                    color
+                } else {
+                    [17, 24, 39, 255]
+                };
+                let offset = (y as usize * logo.width() as usize + x as usize) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&pixel);
+            }
+        }
+    }
+    Image::new_owned(rgba, logo.width(), logo.height())
 }
 
 pub fn setup_system_tray(
@@ -50,28 +69,26 @@ pub fn setup_system_tray(
 
     let menu = Menu::with_items(app, &[&open_item, &settings_item, &sep, &quit_item])?;
 
-    let green_rgba = make_solid_rgba_icon(34, 197, 94);
-    let initial_icon = Image::new_owned(green_rgba, 16, 16);
+    let logo = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+    let up_to_date_icon = tray_icon(&logo, [34, 197, 94, 255]);
+    let error_icon = tray_icon(&logo, [239, 68, 68, 255]);
+    let offline_icon = tray_icon(&logo, [156, 163, 175, 255]);
+    let syncing_icons = [
+        tray_icon(&logo, [96, 165, 250, 255]),
+        tray_icon(&logo, [59, 130, 246, 255]),
+    ];
 
     let tray = TrayIconBuilder::with_id(MAIN_TRAY_ID)
-        .icon(initial_icon)
+        .icon(up_to_date_icon.clone())
         .tooltip(tray_tooltip_for_state(&GlobalSyncState::UpToDate))
         .menu(&menu)
         .on_menu_event(|app_handle, event| match event.id().as_ref() {
             MENU_OPEN_DRIVE_ID => {
-                if let Some(w) = app_handle.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
-                }
+                show_main_window(app_handle);
                 let _ = app_handle.emit("tray:navigate", "status");
             }
             MENU_SETTINGS_ID => {
-                if let Some(w) = app_handle.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
-                }
+                show_main_window(app_handle);
                 let _ = app_handle.emit("tray:navigate", "config");
             }
             MENU_QUIT_ID => {
@@ -94,33 +111,26 @@ pub fn setup_system_tray(
             match state {
                 GlobalSyncState::UpToDate => {
                     animating.store(false, Ordering::SeqCst);
-                    let icon = Image::new_owned(make_solid_rgba_icon(34, 197, 94), 16, 16);
-                    let _ = tray.set_icon(Some(icon));
+                    let _ = tray.set_icon(Some(up_to_date_icon.clone()));
                 }
                 GlobalSyncState::Error => {
                     animating.store(false, Ordering::SeqCst);
-                    let icon = Image::new_owned(make_solid_rgba_icon(239, 68, 68), 16, 16);
-                    let _ = tray.set_icon(Some(icon));
+                    let _ = tray.set_icon(Some(error_icon.clone()));
                 }
                 GlobalSyncState::Offline => {
                     animating.store(false, Ordering::SeqCst);
-                    let icon = Image::new_owned(make_solid_rgba_icon(156, 163, 175), 16, 16);
-                    let _ = tray.set_icon(Some(icon));
+                    let _ = tray.set_icon(Some(offline_icon.clone()));
                 }
                 GlobalSyncState::Syncing => {
                     if !animating.swap(true, Ordering::SeqCst) {
                         let tray_anim = tray.clone();
                         let anim_flag = Arc::clone(&animating);
+                        let icons = syncing_icons.clone();
                         tokio::spawn(async move {
-                            let mut frame = false;
+                            let mut frame = 0;
                             while anim_flag.load(Ordering::SeqCst) {
-                                let rgba = if frame {
-                                    make_solid_rgba_icon(59, 130, 246)
-                                } else {
-                                    make_solid_rgba_icon(96, 165, 250)
-                                };
-                                let _ = tray_anim.set_icon(Some(Image::new_owned(rgba, 16, 16)));
-                                frame = !frame;
+                                let _ = tray_anim.set_icon(Some(icons[frame].clone()));
+                                frame ^= 1;
                                 tokio::time::sleep(Duration::from_millis(500)).await;
                             }
                         });
@@ -148,4 +158,23 @@ pub fn setup_system_tray(
     app.listen("network:online", move |_| r3());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_icon_preserves_logo_and_displays_status_color() {
+        let logo = Image::from_bytes(include_bytes!("../icons/32x32.png")).unwrap();
+        let color = [34, 197, 94, 255];
+        let icon = tray_icon(&logo, color);
+        let row_bytes = logo.width() as usize * 4;
+        let badge_center = 24 * row_bytes + 24 * 4;
+
+        assert_eq!((icon.width(), icon.height()), (32, 32));
+        assert_eq!(&icon.rgba()[..17 * row_bytes], &logo.rgba()[..17 * row_bytes]);
+        assert_eq!(icon.rgba()[3], 0);
+        assert_eq!(&icon.rgba()[badge_center..badge_center + 4], &color);
+    }
 }

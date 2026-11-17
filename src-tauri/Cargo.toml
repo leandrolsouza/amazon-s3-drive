@@ -1,6 +1,6 @@
 [package]
 name = "amazon-s3-drive"
-version = "0.5.1"
+version = "0.5.2"
 description = "Amazon S3 Drive — Desktop bidirectional S3 sync application"
 authors = ["Amazon S3 Drive Team"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 aws-sdk-cloudformation = "1"
@@ -43,3 +43,6 @@ tauri-plugin-window-state = "2"
 
 [dev-dependencies]
 proptest = "1"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"

@@ -20,6 +20,8 @@ O Amazon S3 Drive é uma aplicação desktop cross-platform construída com **Ta
 
 Quando a bandeja está disponível, o Tauri intercepta o fechamento da janela principal se `close_to_tray` estiver ativo. Configurações antigas sem esse campo usam o padrão ativo. O primeiro retorno à janela após ocultá-la apresenta uma orientação sobre como reabrir ou sair pela bandeja.
 
+O plugin de instância única do Tauri restaura a janela principal da instância em execução quando o usuário abre o aplicativo novamente. O ícone da bandeja usa o logotipo do aplicativo com um indicador de status verde (em dia), azul animado (sincronizando), vermelho (erro) ou cinza (offline).
+
 O comando `sync_now` sinaliza o ciclo ativo da sincronização principal para consultar o S3. O ciclo processa a conferência manual pelo mesmo caminho das consultas periódicas e reinicia o temporizador após a consulta. O monitor de arquivos continua entregando eventos locais independentemente desse intervalo.
 
 **Princípios de design:**

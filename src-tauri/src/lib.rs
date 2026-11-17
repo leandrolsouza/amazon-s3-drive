@@ -823,6 +823,9 @@ pub fn run() {
     use tauri_plugin_window_state::StateFlags;
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            tray::show_main_window(app);
+        }))
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
