@@ -149,10 +149,21 @@ impl FileWatcher {
 
         let tx_for_cb = raw_tx.clone();
         let pending_rename: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let configured_path = self.watch_path.clone();
+        let canonical_path = configured_path
+            .canonicalize()
+            .map_err(|err| WatchError::InvalidPath(err.to_string()))?;
 
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
-                if let Ok(event) = res {
+                if let Ok(mut event) = res {
+                    // FSEvents pode reportar /private/var para uma pasta configurada em /var.
+                    // O caminho do arquivo pode não existir mais, então resolvemos só a raiz.
+                    for path in &mut event.paths {
+                        if let Ok(relative) = path.strip_prefix(&canonical_path) {
+                            *path = configured_path.join(relative);
+                        }
+                    }
                     let mut guard = pending_rename.lock().unwrap();
                     let events = Self::map_notify_event(event, &mut guard);
                     for ev in events {
